@@ -7,7 +7,7 @@ export JWARS_API_URL=http://127.0.0.1:8080
 export JWARS_API_TOKEN=dev-token
 ```
 
-Start the game server in another terminal with `./tools/run.sh` from the repository root.
+Start the game server in another terminal with `./tools/run_jwars.sh` from the repository root.
 
 ## Reset the local database
 
@@ -16,6 +16,14 @@ Start the game server in another terminal with `./tools/run.sh` from the reposit
 ```
 
 This removes the Compose database volume, including all players and world state, then starts an empty PostgreSQL database. Restart the server afterward so it initializes the fresh world.
+
+## Run integration tests
+
+```sh
+./tools/run_integration_tests.sh
+```
+
+This runs the HTTP and PostgreSQL integration suite in `tests/integration/` against a temporary PostgreSQL container, then removes it. It requires Go and a working Docker-compatible container runtime. `-count=1` makes sure each invocation runs the tests instead of reusing Go's test cache. You can also run it with `go test -count=1 ./tests/integration/...`.
 
 ## Read the current state
 

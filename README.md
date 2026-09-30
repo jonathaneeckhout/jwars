@@ -7,10 +7,12 @@ A persistent, server-authoritative RTS where players build bases and command uni
 Requires Go 1.25 or newer, Docker Compose, `curl`, and `jq` for the helper scripts. The server creates a development player and token, persists the world in PostgreSQL, and advances it once per second.
 
 ```sh
-./tools/run.sh
+./tools/run_jwars.sh
 ```
 
 The first run creates `.env` from `.env.example` if needed, starts PostgreSQL with Docker Compose, and launches the server. Stop the server with Ctrl+C; the database remains running for the next start. Other Bash API helpers are also in `tools/`.
+
+Run the PostgreSQL-backed HTTP integration suite with `./tools/run_integration_tests.sh`. The suite lives in `tests/integration/`, starts a disposable PostgreSQL container through Testcontainers, and removes it when the test process exits; it does not touch the persistent development database.
 
 The database schema is created by the server on startup. Migrations are intentionally omitted while the schema is evolving. After a schema change, stop the server, then reset the disposable local database before starting it again:
 

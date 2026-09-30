@@ -15,4 +15,4 @@ docker compose down --volumes
 printf 'Starting a fresh PostgreSQL database...\n'
 docker compose up -d db
 
-printf 'Database reset complete. Start jwars with ./tools/run.sh.\n'
+printf 'Database reset complete. Start jwars with ./tools/run_jwars.sh.\n'
