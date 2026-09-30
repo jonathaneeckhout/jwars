@@ -50,8 +50,10 @@ var schemaStatements = []string{
 		width INTEGER NOT NULL CHECK (width > 0),
 		height INTEGER NOT NULL CHECK (height > 0),
 		status TEXT NOT NULL CHECK (status IN ('constructing', 'complete')),
+		started_tick BIGINT NOT NULL DEFAULT 0 CHECK (started_tick >= 0),
+		build_ticks BIGINT NOT NULL DEFAULT 0 CHECK (build_ticks >= 0),
 		completion_tick BIGINT,
-		CHECK ((status = 'constructing' AND completion_tick IS NOT NULL) OR (status = 'complete' AND completion_tick IS NULL)),
+		CHECK ((status = 'constructing' AND completion_tick IS NOT NULL AND completion_tick = started_tick + build_ticks AND build_ticks > 0) OR (status = 'complete' AND completion_tick IS NULL)),
 		CHECK (x + width <= 1000 AND y + height <= 1000)
 	)`,
 	`CREATE INDEX IF NOT EXISTS buildings_player_id_idx ON buildings(player_id, id)`,
@@ -125,9 +127,13 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	}
 	if unitCount == 0 {
 		for _, unit := range []Unit{
-			{ID: playerID + "-worker-1", OwnerID: playerID, Kind: "worker", X: 13, Y: 12},
-			{ID: playerID + "-soldier-1", OwnerID: playerID, Kind: "soldier", X: 14, Y: 12},
+			{OwnerID: playerID, Kind: "worker", X: 13, Y: 12},
+			{OwnerID: playerID, Kind: "soldier", X: 14, Y: 12},
 		} {
+			unit.ID, err = newID()
+			if err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `INSERT INTO units (id, player_id, kind, x, y) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`, unit.ID, playerID, unit.Kind, unit.X, unit.Y); err != nil {
 				return err
 			}
@@ -143,8 +149,12 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 			if !definition.Starting {
 				continue
 			}
+			buildingID, err := newID()
+			if err != nil {
+				return err
+			}
 			building := Building{
-				ID: playerID + "-" + definition.Kind, OwnerID: playerID,
+				ID: buildingID, OwnerID: playerID,
 				Kind: definition.Kind, X: definition.StartX, Y: definition.StartY,
 				Width: definition.Width, Height: definition.Height, Status: "complete",
 			}

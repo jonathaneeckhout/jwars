@@ -41,6 +41,10 @@ type Building struct {
 	Width          int    `json:"width"`
 	Height         int    `json:"height"`
 	Status         string `json:"status"`
+	BuildTicks     int64  `json:"build_ticks"`
+	ProgressTicks  int64  `json:"progress_ticks"`
+	ProgressPct    int    `json:"progress_percent"`
+	StartedTick    int64  `json:"-"`
 	CompletionTick *int64 `json:"completion_tick,omitempty"`
 }
 
@@ -191,7 +195,7 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 	}
 
 	buildingRows, err := tx.Query(ctx, `
-		SELECT id, player_id, kind, x, y, width, height, status, completion_tick
+		SELECT id, player_id, kind, x, y, width, height, status, started_tick, build_ticks, completion_tick
 		FROM buildings WHERE player_id = $1 ORDER BY id`, playerID)
 	if err != nil {
 		return Snapshot{}, err
@@ -202,6 +206,7 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 			buildingRows.Close()
 			return Snapshot{}, err
 		}
+		setBuildingProgress(&building, snapshot.Tick)
 		snapshot.Buildings = append(snapshot.Buildings, building)
 	}
 	buildingRows.Close()
@@ -334,33 +339,49 @@ func (w *World) Step(ctx context.Context) error {
 	}
 
 	buildingRows, err := tx.Query(ctx, `
-		SELECT id, player_id, kind, x, y, width, height, status, completion_tick
-		FROM buildings WHERE status = 'constructing' AND completion_tick <= $1
-		ORDER BY player_id, id FOR UPDATE`, tick)
+		SELECT id, player_id, kind, x, y, width, height, status, started_tick, build_ticks, completion_tick
+		FROM buildings WHERE status = 'constructing'
+		ORDER BY player_id, id FOR UPDATE`)
 	if err != nil {
 		return err
 	}
 	completedBuildings := map[string][]Building{}
-	buildingsToComplete := make([]Building, 0)
+	progressBuildings := map[string][]Building{}
+	buildingsToUpdate := make([]Building, 0)
 	for buildingRows.Next() {
 		building, err := scanBuilding(buildingRows)
 		if err != nil {
 			buildingRows.Close()
 			return err
 		}
-		buildingsToComplete = append(buildingsToComplete, building)
+		buildingsToUpdate = append(buildingsToUpdate, building)
 	}
 	buildingRows.Close()
 	if err := buildingRows.Err(); err != nil {
 		return err
 	}
-	for _, building := range buildingsToComplete {
-		building.Status = "complete"
-		building.CompletionTick = nil
-		if _, err := tx.Exec(ctx, `UPDATE buildings SET status = 'complete', completion_tick = NULL WHERE id = $1`, building.ID); err != nil {
+	for _, building := range buildingsToUpdate {
+		if building.CompletionTick != nil && *building.CompletionTick <= tick {
+			building.Status = "complete"
+			building.CompletionTick = nil
+			setBuildingProgress(&building, tick)
+			if _, err := tx.Exec(ctx, `UPDATE buildings SET status = 'complete', completion_tick = NULL WHERE id = $1`, building.ID); err != nil {
+				return err
+			}
+			completedBuildings[building.OwnerID] = append(completedBuildings[building.OwnerID], building)
+			continue
+		}
+		previousMilestone := constructionMilestone(building, tick-1)
+		setBuildingProgress(&building, tick)
+		if building.ProgressPct > previousMilestone {
+			progressBuildings[building.OwnerID] = append(progressBuildings[building.OwnerID], building)
+		}
+	}
+	for playerID, buildings := range progressBuildings {
+		update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.progress", Buildings: buildings}
+		if _, err := appendEvent(ctx, tx, update); err != nil {
 			return err
 		}
-		completedBuildings[building.OwnerID] = append(completedBuildings[building.OwnerID], building)
 	}
 	for playerID, buildings := range completedBuildings {
 		update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.completed", Buildings: buildings}
@@ -574,19 +595,20 @@ func (w *World) applyBuild(ctx context.Context, tx pgx.Tx, playerID string, tick
 	if _, err := tx.Exec(ctx, `UPDATE player_resources SET materials = $2 WHERE player_id = $1`, playerID, materials); err != nil {
 		return result, err
 	}
-	buildingID, err := newID("building")
+	buildingID, err := newID()
 	if err != nil {
 		return result, err
 	}
 	completionTick := tick + definition.BuildTicks
 	building, err := scanBuilding(tx.QueryRow(ctx, `
-		INSERT INTO buildings (id, player_id, kind, x, y, width, height, status, completion_tick)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'constructing',$8)
-		RETURNING id, player_id, kind, x, y, width, height, status, completion_tick`,
-		buildingID, playerID, definition.Kind, *command.X, *command.Y, definition.Width, definition.Height, completionTick))
+		INSERT INTO buildings (id, player_id, kind, x, y, width, height, status, started_tick, build_ticks, completion_tick)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'constructing',$8,$9,$10)
+		RETURNING id, player_id, kind, x, y, width, height, status, started_tick, build_ticks, completion_tick`,
+		buildingID, playerID, definition.Kind, *command.X, *command.Y, definition.Width, definition.Height, tick, definition.BuildTicks, completionTick))
 	if err != nil {
 		return result, err
 	}
+	setBuildingProgress(&building, tick)
 	update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.started", Buildings: []Building{building}, Resources: []Resource{{Kind: "materials", Amount: materials}}}
 	sequence, err := appendEvent(ctx, tx, update)
 	if err != nil {
@@ -613,12 +635,12 @@ func insideMap(x, y int) bool {
 	return x >= 0 && x < MapSize && y >= 0 && y < MapSize
 }
 
-func newID(prefix string) (string, error) {
+func newID() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
 		return "", err
 	}
-	return prefix + "-" + hex.EncodeToString(value[:]), nil
+	return hex.EncodeToString(value[:]), nil
 }
 
 func scanUnit(row pgx.Row) (Unit, error) {
@@ -639,10 +661,39 @@ func scanUnit(row pgx.Row) (Unit, error) {
 func scanBuilding(row pgx.Row) (Building, error) {
 	var building Building
 	var completionTick pgtype.Int8
-	err := row.Scan(&building.ID, &building.OwnerID, &building.Kind, &building.X, &building.Y, &building.Width, &building.Height, &building.Status, &completionTick)
+	err := row.Scan(&building.ID, &building.OwnerID, &building.Kind, &building.X, &building.Y, &building.Width, &building.Height, &building.Status, &building.StartedTick, &building.BuildTicks, &completionTick)
 	if completionTick.Valid {
 		value := completionTick.Int64
 		building.CompletionTick = &value
 	}
 	return building, err
+}
+
+func setBuildingProgress(building *Building, tick int64) {
+	if building.Status == "complete" {
+		building.ProgressTicks = building.BuildTicks
+		building.ProgressPct = 100
+		return
+	}
+	progress := tick - building.StartedTick
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > building.BuildTicks {
+		progress = building.BuildTicks
+	}
+	building.ProgressTicks = progress
+	if building.BuildTicks > 0 {
+		building.ProgressPct = int(progress * 100 / building.BuildTicks)
+	}
+}
+
+func constructionMilestone(building Building, tick int64) int {
+	setBuildingProgress(&building, tick)
+	for _, milestone := range [...]int{75, 50, 25} {
+		if building.ProgressPct >= milestone {
+			return milestone
+		}
+	}
+	return 0
 }

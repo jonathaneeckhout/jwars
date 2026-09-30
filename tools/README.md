@@ -40,8 +40,11 @@ The listener prints a snapshot first, then one compact JSON envelope per SSE upd
 Coordinates are whole numbers from `0` through `999`; provide one or more unit IDs:
 
 ```sh
-./tools/move.sh 8 5 player-1-worker-1 player-1-soldier-1
+./tools/state.sh | jq '.units[] | {id, kind, x, y}'
+./tools/move.sh 8 5 <worker-id> <soldier-id>
 ```
+
+Entity IDs are random opaque values. Discover them from a state snapshot or events; don't guess or construct them.
 
 The response includes the command ID and whether the server accepted the order. Rejections are printed with their reason and the script exits non-zero.
 
@@ -55,4 +58,4 @@ curl -H "Authorization: Bearer $JWARS_API_TOKEN" \
 ./tools/build.sh prototype 20 20
 ```
 
-The server validates the definition, resource balance, queue, footprint, and map occupancy. The response confirms the accepted order; `listen.sh` reports when construction completes.
+The server validates the definition, resource balance, queue, footprint, and map occupancy. The response confirms the accepted order. `listen.sh` receives `buildings.progress` events at 25%, 50%, and 75%, then a `buildings.completed` event at 100%. The state snapshot includes exact current progress between events.

@@ -12,14 +12,13 @@ Requires Go 1.25 or newer, Docker Compose, `curl`, and `jq` for the helper scrip
 
 The first run creates `.env` from `.env.example` if needed, starts PostgreSQL with Docker Compose, and launches the server. Stop the server with Ctrl+C; the database remains running for the next start. Other Bash API helpers are also in `tools/`.
 
-The database schema is created by the server on startup. Migrations are intentionally omitted while the schema is evolving. To reset the disposable local database after a schema change:
+The database schema is created by the server on startup. Migrations are intentionally omitted while the schema is evolving. After a schema change, stop the server, then reset the disposable local database before starting it again:
 
 ```sh
-docker compose down -v
-docker compose up -d db
+./tools/clean_db.sh
 ```
 
-That removes all local player and world data in the Compose database volume. The old `data/world.json` file is not imported.
+That removes all local player and world data in the Compose database volume and starts a fresh PostgreSQL instance. The old `data/world.json` file is not imported.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -40,13 +39,14 @@ curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/world
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/buildings
 ```
 
-Issue a move order. Commands use stable unit IDs and a client-generated ID; repeating the same ID for that player returns the original result.
+Entity IDs are opaque random 128-bit hex strings, so clients should read them from the snapshot or events rather than constructing them. Issue a move order with a discovered unit ID. Commands use stable unit IDs and a client-generated command ID; repeating the same command ID for that player returns the original result.
 
 ```sh
+UNIT_ID="$(curl -fsS -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/world | jq -r '.units[0].id')"
 curl -X POST http://127.0.0.1:8080/v1/commands \
   -H 'Authorization: Bearer dev-token' \
   -H 'Content-Type: application/json' \
-  -d '{"id":"order-001","type":"move","unit_ids":["player-1-worker-1"],"target":{"x":8,"y":5}}'
+  -d "$(jq -cn --arg unit_id "$UNIT_ID" '{id:"order-001",type:"move",unit_ids:[$unit_id],target:{x:8,y:5}}')"
 ```
 
 Issue a data-defined build order:
@@ -64,6 +64,8 @@ Follow ordered updates. Pass `?after=<sequence>` when reconnecting; if the curso
 curl -N -H 'Authorization: Bearer dev-token' \
   'http://127.0.0.1:8080/v1/events?after=0'
 ```
+
+Building objects in snapshots include `build_ticks`, `progress_ticks`, and `progress_percent`. The event stream emits `buildings.progress` when a construction crosses 25%, 50%, or 75%; `buildings.completed` reports 100%. Progress still advances each world tick, so a snapshot contains the latest exact value between milestone events.
 
 Convenience Bash scripts for snapshots, listening, move orders, and builds are in [`tools/`](tools/README.md).
 
