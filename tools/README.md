@@ -56,6 +56,17 @@ Entity IDs are random opaque values. Discover them from a state snapshot or even
 
 The response includes the command ID and whether the server accepted the order. Rejections are printed with their reason and the script exits non-zero.
 
+## Attack an enemy unit
+
+Enemy units must currently be visible in your snapshot. Select a discovered enemy unit ID and one or more of your soldiers:
+
+```sh
+./tools/state.sh | jq '.units[] | {id, owner_id, kind, x, y, health}'
+./tools/attack.sh <enemy-unit-id> <soldier-id> [soldier-id ...]
+```
+
+Soldiers deal 20 damage per tick at a range of one tile. Workers cannot attack. Attackers pursue visible targets and move toward a target's last seen position if it leaves vision. Snapshots include your entities and currently visible enemy entities; `entities.hidden` events tell listeners when an enemy leaves vision.
+
 ## Build a structure
 
 List the server-defined building types, then issue a build order with a type and top-left map position:

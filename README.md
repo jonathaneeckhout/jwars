@@ -69,10 +69,23 @@ curl -N -H 'Authorization: Bearer dev-token' \
 
 Building objects in snapshots include `build_ticks`, `progress_ticks`, and `progress_percent`. The event stream emits `buildings.progress` when a construction crosses 25%, 50%, or 75%; `buildings.completed` reports 100%. Progress still advances each world tick, so a snapshot contains the latest exact value between milestone events.
 
-Convenience Bash scripts for snapshots, listening, move orders, and builds are in [`tools/`](tools/README.md).
+Snapshots always include your own units and buildings, plus enemy units and buildings currently within your vision. Units have 8 tiles of vision; completed ordinary buildings have 6 and the completed `base_core` has 12. Distance uses Chebyshev distance, so diagonal movement counts as one tile. Buildings under construction do not provide vision. `units.spotted` and `buildings.spotted` reveal newly visible entities; `entities.hidden` contains only entity IDs and types when they leave vision.
+
+Issue an explicit attack order against a currently visible enemy unit:
+
+```sh
+curl -X POST http://127.0.0.1:8080/v1/commands \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"attack-001","type":"attack","unit_ids":["<your-soldier-id>"],"target_unit_id":"<visible-enemy-unit-id>"}'
+```
+
+Workers cannot attack. Soldiers have 100 health and deal 20 damage per tick at one-tile range. Attackers pursue visible targets; when a target leaves vision, they move toward its last seen position and wait there until they see it again. Damage is applied simultaneously each tick. `units.damaged` and `units.destroyed` events report combat results. Units do not retaliate or heal automatically, and destroyed units do not respawn.
+
+Convenience Bash scripts for snapshots, listening, move and attack orders, and builds are in [`tools/`](tools/README.md).
 
 ## Current scope
 
 The server stores players, token hashes, units, buildings, resources, command results, per-player event sequences, and a bounded event history in PostgreSQL. Tick and command writes are serialized by one Go process and persisted with their corresponding events in one transaction. Construction uses data-driven definitions; the included `prototype` definition is only a functional placeholder. World time pauses during server downtime and resumes from the last committed tick.
 
-There is no player registration flow, combat, fog of war, resource balancing, multi-process coordination, or automatic schema migration yet. The environment-seeded player/token is for local development; change it before using the server beyond localhost.
+There is no player registration flow, unit recruitment, building damage, terrain-based line of sight, remembered fog-of-war state, resource balancing, multi-process coordination, or automatic schema migration yet. The environment-seeded player/token is for local development; change it before using the server beyond localhost.

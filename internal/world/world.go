@@ -23,13 +23,19 @@ const (
 )
 
 type Unit struct {
-	ID      string `json:"id"`
-	OwnerID string `json:"owner_id"`
-	Kind    string `json:"kind"`
-	X       int    `json:"x"`
-	Y       int    `json:"y"`
-	TargetX *int   `json:"target_x,omitempty"`
-	TargetY *int   `json:"target_y,omitempty"`
+	ID             string  `json:"id"`
+	OwnerID        string  `json:"owner_id"`
+	Kind           string  `json:"kind"`
+	X              int     `json:"x"`
+	Y              int     `json:"y"`
+	Health         int     `json:"health"`
+	MaxHealth      int     `json:"max_health"`
+	VisionRange    int     `json:"vision_range"`
+	TargetX        *int    `json:"target_x,omitempty"`
+	TargetY        *int    `json:"target_y,omitempty"`
+	AttackTargetID *string `json:"attack_target_id,omitempty"`
+	AttackTargetX  *int    `json:"-"`
+	AttackTargetY  *int    `json:"-"`
 }
 
 type Building struct {
@@ -44,6 +50,7 @@ type Building struct {
 	BuildTicks     int64  `json:"build_ticks"`
 	ProgressTicks  int64  `json:"progress_ticks"`
 	ProgressPct    int    `json:"progress_percent"`
+	VisionRange    int    `json:"vision_range"`
 	StartedTick    int64  `json:"-"`
 	CompletionTick *int64 `json:"completion_tick,omitempty"`
 }
@@ -63,6 +70,7 @@ type Command struct {
 	Type         string   `json:"type"`
 	UnitIDs      []string `json:"unit_ids,omitempty"`
 	Target       *Point   `json:"target,omitempty"`
+	TargetUnitID string   `json:"target_unit_id,omitempty"`
 	BuildingKind string   `json:"building_kind,omitempty"`
 	X            *int     `json:"x,omitempty"`
 	Y            *int     `json:"y,omitempty"`
@@ -76,13 +84,19 @@ type CommandResult struct {
 }
 
 type Update struct {
-	PlayerID  string     `json:"player_id"`
-	Sequence  int64      `json:"sequence"`
-	Tick      int64      `json:"tick"`
-	Type      string     `json:"type"`
-	Units     []Unit     `json:"units,omitempty"`
-	Buildings []Building `json:"buildings,omitempty"`
-	Resources []Resource `json:"resources,omitempty"`
+	PlayerID  string      `json:"player_id"`
+	Sequence  int64       `json:"sequence"`
+	Tick      int64       `json:"tick"`
+	Type      string      `json:"type"`
+	Units     []Unit      `json:"units,omitempty"`
+	Buildings []Building  `json:"buildings,omitempty"`
+	Resources []Resource  `json:"resources,omitempty"`
+	Entities  []EntityRef `json:"entities,omitempty"`
+}
+
+type EntityRef struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
 type Snapshot struct {
@@ -172,9 +186,11 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 		}
 	}
 
+	units := make([]Unit, 0)
+	buildings := make([]Building, 0)
 	unitRows, err := tx.Query(ctx, `
-		SELECT id, player_id, kind, x, y, target_x, target_y
-		FROM units WHERE player_id = $1 ORDER BY id`, playerID)
+		SELECT id, player_id, kind, x, y, target_x, target_y, health, target_unit_id, attack_target_x, attack_target_y
+		FROM units ORDER BY id`)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -184,19 +200,15 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 			unitRows.Close()
 			return Snapshot{}, err
 		}
-		snapshot.Units = append(snapshot.Units, unit)
+		units = append(units, unit)
 	}
 	unitRows.Close()
 	if err := unitRows.Err(); err != nil {
 		return Snapshot{}, err
 	}
-	if snapshot.Units == nil {
-		snapshot.Units = []Unit{}
-	}
-
 	buildingRows, err := tx.Query(ctx, `
 		SELECT id, player_id, kind, x, y, width, height, status, started_tick, build_ticks, completion_tick
-		FROM buildings WHERE player_id = $1 ORDER BY id`, playerID)
+		FROM buildings ORDER BY id`)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -207,11 +219,25 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 			return Snapshot{}, err
 		}
 		setBuildingProgress(&building, snapshot.Tick)
-		snapshot.Buildings = append(snapshot.Buildings, building)
+		buildings = append(buildings, building)
 	}
 	buildingRows.Close()
 	if err := buildingRows.Err(); err != nil {
 		return Snapshot{}, err
+	}
+	visible := visibleEntities(playerID, units, buildings)
+	for _, unit := range units {
+		if visible[entityKey("unit:"+unit.ID)] {
+			snapshot.Units = append(snapshot.Units, enrichUnit(unit, playerID))
+		}
+	}
+	for _, building := range buildings {
+		if visible[entityKey("building:"+building.ID)] {
+			snapshot.Buildings = append(snapshot.Buildings, enrichBuilding(building))
+		}
+	}
+	if snapshot.Units == nil {
+		snapshot.Units = []Unit{}
 	}
 	if snapshot.Buildings == nil {
 		snapshot.Buildings = []Building{}
@@ -295,47 +321,26 @@ func (w *World) Step(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT tick FROM world_meta WHERE singleton = TRUE FOR UPDATE`).Scan(&tick); err != nil {
 		return err
 	}
+	beforeUnits, err := loadUnits(ctx, tx, true)
+	if err != nil {
+		return err
+	}
+	beforeBuildings, err := loadBuildings(ctx, tx, true)
+	if err != nil {
+		return err
+	}
+	playerIDs, err := loadPlayerIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
 	tick++
 	if _, err := tx.Exec(ctx, `UPDATE world_meta SET tick = $1 WHERE singleton = TRUE`, tick); err != nil {
 		return err
 	}
 
-	unitRows, err := tx.Query(ctx, `
-		SELECT id, player_id, kind, x, y, target_x, target_y
-		FROM units WHERE target_x IS NOT NULL AND target_y IS NOT NULL ORDER BY player_id, id FOR UPDATE`)
+	combatResult, err := advanceCombatTick(ctx, tx, beforeUnits, beforeBuildings)
 	if err != nil {
 		return err
-	}
-	unitsToMove := make([]Unit, 0)
-	for unitRows.Next() {
-		unit, err := scanUnit(unitRows)
-		if err != nil {
-			unitRows.Close()
-			return err
-		}
-		unitsToMove = append(unitsToMove, unit)
-	}
-	unitRows.Close()
-	if err := unitRows.Err(); err != nil {
-		return err
-	}
-	changedUnits := map[string][]Unit{}
-	for _, unit := range unitsToMove {
-		unit.X, unit.Y = stepToward(unit.X, unit.Y, *unit.TargetX, *unit.TargetY)
-		if unit.X == *unit.TargetX && unit.Y == *unit.TargetY {
-			unit.TargetX, unit.TargetY = nil, nil
-		}
-		if _, err := tx.Exec(ctx, `UPDATE units SET x = $2, y = $3, target_x = $4, target_y = $5 WHERE id = $1`, unit.ID, unit.X, unit.Y, unit.TargetX, unit.TargetY); err != nil {
-			unitRows.Close()
-			return err
-		}
-		changedUnits[unit.OwnerID] = append(changedUnits[unit.OwnerID], unit)
-	}
-	for playerID, units := range changedUnits {
-		update := Update{PlayerID: playerID, Tick: tick, Type: "units.changed", Units: units}
-		if _, err := appendEvent(ctx, tx, update); err != nil {
-			return err
-		}
 	}
 
 	buildingRows, err := tx.Query(ctx, `
@@ -378,12 +383,18 @@ func (w *World) Step(ctx context.Context) error {
 		}
 	}
 	for playerID, buildings := range progressBuildings {
+		for i := range buildings {
+			buildings[i] = enrichBuilding(buildings[i])
+		}
 		update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.progress", Buildings: buildings}
 		if _, err := appendEvent(ctx, tx, update); err != nil {
 			return err
 		}
 	}
 	for playerID, buildings := range completedBuildings {
+		for i := range buildings {
+			buildings[i] = enrichBuilding(buildings[i])
+		}
 		update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.completed", Buildings: buildings}
 		if _, err := appendEvent(ctx, tx, update); err != nil {
 			return err
@@ -428,6 +439,20 @@ func (w *World) Step(ctx context.Context) error {
 		}
 	}
 
+	afterUnits, err := loadUnits(ctx, tx, false)
+	if err != nil {
+		return err
+	}
+	afterBuildings, err := loadBuildings(ctx, tx, false)
+	if err != nil {
+		return err
+	}
+	for i := range afterBuildings {
+		setBuildingProgress(&afterBuildings[i], tick)
+	}
+	if err := emitWorldEvents(ctx, tx, tick, playerIDs, beforeUnits, beforeBuildings, afterUnits, afterBuildings, combatResult.destroyed); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -462,6 +487,8 @@ func (w *World) ApplyCommand(ctx context.Context, playerID string, command Comma
 	switch command.Type {
 	case "move":
 		result, err = w.applyMove(ctx, tx, playerID, tick, command)
+	case "attack":
+		result, err = w.applyAttack(ctx, tx, playerID, tick, command)
 	case "build":
 		result, err = w.applyBuild(ctx, tx, playerID, tick, command)
 	default:
@@ -524,9 +551,9 @@ func (w *World) applyMove(ctx context.Context, tx pgx.Tx, playerID string, tick 
 	for _, id := range command.UnitIDs {
 		targetX, targetY := command.Target.X, command.Target.Y
 		unit, err := scanUnit(tx.QueryRow(ctx, `
-			UPDATE units SET target_x = $3, target_y = $4
+			UPDATE units SET target_x = $3, target_y = $4, target_unit_id = NULL, attack_target_x = NULL, attack_target_y = NULL
 			WHERE player_id = $1 AND id = $2
-			RETURNING id, player_id, kind, x, y, target_x, target_y`, playerID, id, targetX, targetY))
+			RETURNING id, player_id, kind, x, y, target_x, target_y, health, target_unit_id, attack_target_x, attack_target_y`, playerID, id, targetX, targetY))
 		if err != nil {
 			return result, err
 		}
@@ -534,6 +561,82 @@ func (w *World) applyMove(ctx context.Context, tx pgx.Tx, playerID string, tick 
 	}
 	update := Update{PlayerID: playerID, Tick: tick, Type: "orders.updated", Units: changed}
 	sequence, err := appendEvent(ctx, tx, update)
+	if err != nil {
+		return result, err
+	}
+	result.Accepted, result.Sequence = true, sequence
+	return result, nil
+}
+
+func (w *World) applyAttack(ctx context.Context, tx pgx.Tx, playerID string, tick int64, command Command) (CommandResult, error) {
+	result := CommandResult{ID: command.ID}
+	if command.TargetUnitID == "" {
+		result.Reason = "target_unit_id is required"
+		return result, nil
+	}
+	if len(command.UnitIDs) == 0 {
+		result.Reason = "at least one unit is required"
+		return result, nil
+	}
+	seen := make(map[string]struct{}, len(command.UnitIDs))
+	for _, id := range command.UnitIDs {
+		if _, exists := seen[id]; exists {
+			result.Reason = "unit ids must be unique"
+			return result, nil
+		}
+		seen[id] = struct{}{}
+	}
+
+	units, err := loadUnits(ctx, tx, true)
+	if err != nil {
+		return result, err
+	}
+	buildings, err := loadBuildings(ctx, tx, false)
+	if err != nil {
+		return result, err
+	}
+	visible := visibleEntities(playerID, units, buildings)
+	var target *Unit
+	for i := range units {
+		if units[i].ID == command.TargetUnitID && units[i].OwnerID != playerID {
+			target = &units[i]
+			break
+		}
+	}
+	if target == nil || !visible[entityKey("unit:"+command.TargetUnitID)] {
+		result.Reason = "target unit is unavailable or not visible"
+		return result, nil
+	}
+	selected := make(map[string]Unit, len(command.UnitIDs))
+	for _, unit := range units {
+		if unit.OwnerID == playerID {
+			selected[unit.ID] = unit
+		}
+	}
+	if len(selected) < len(command.UnitIDs) {
+		result.Reason = "one or more units are unavailable to this player"
+		return result, nil
+	}
+	for _, id := range command.UnitIDs {
+		if unitAttackDamage(selected[id].Kind) == 0 {
+			result.Reason = "one or more selected units cannot attack"
+			return result, nil
+		}
+	}
+
+	changed := make([]Unit, 0, len(command.UnitIDs))
+	for _, id := range command.UnitIDs {
+		unit, err := scanUnit(tx.QueryRow(ctx, `
+			UPDATE units SET target_x = NULL, target_y = NULL, target_unit_id = $3, attack_target_x = $4, attack_target_y = $5
+			WHERE player_id = $1 AND id = $2
+			RETURNING id, player_id, kind, x, y, target_x, target_y, health, target_unit_id, attack_target_x, attack_target_y`,
+			playerID, id, command.TargetUnitID, target.X, target.Y))
+		if err != nil {
+			return result, err
+		}
+		changed = append(changed, unit)
+	}
+	sequence, err := appendEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "orders.updated", Units: changed})
 	if err != nil {
 		return result, err
 	}
@@ -609,10 +712,34 @@ func (w *World) applyBuild(ctx context.Context, tx pgx.Tx, playerID string, tick
 		return result, err
 	}
 	setBuildingProgress(&building, tick)
+	building = enrichBuilding(building)
 	update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.started", Buildings: []Building{building}, Resources: []Resource{{Kind: "materials", Amount: materials}}}
 	sequence, err := appendEvent(ctx, tx, update)
 	if err != nil {
 		return result, err
+	}
+	allUnits, err := loadUnits(ctx, tx, false)
+	if err != nil {
+		return result, err
+	}
+	allBuildings, err := loadBuildings(ctx, tx, false)
+	if err != nil {
+		return result, err
+	}
+	players, err := loadPlayerIDs(ctx, tx)
+	if err != nil {
+		return result, err
+	}
+	for _, observerID := range players {
+		if observerID == playerID {
+			continue
+		}
+		visible := visibleEntities(observerID, allUnits, allBuildings)
+		if visible[entityKey("building:"+building.ID)] {
+			if err := appendWorldEvent(ctx, tx, Update{PlayerID: observerID, Tick: tick, Type: "buildings.spotted", Buildings: []Building{building}}); err != nil {
+				return result, err
+			}
+		}
 	}
 	result.Accepted, result.Sequence = true, sequence
 	return result, nil
@@ -646,7 +773,9 @@ func newID() (string, error) {
 func scanUnit(row pgx.Row) (Unit, error) {
 	var unit Unit
 	var targetX, targetY pgtype.Int4
-	err := row.Scan(&unit.ID, &unit.OwnerID, &unit.Kind, &unit.X, &unit.Y, &targetX, &targetY)
+	var targetUnitID pgtype.Text
+	var attackTargetX, attackTargetY pgtype.Int4
+	err := row.Scan(&unit.ID, &unit.OwnerID, &unit.Kind, &unit.X, &unit.Y, &targetX, &targetY, &unit.Health, &targetUnitID, &attackTargetX, &attackTargetY)
 	if targetX.Valid {
 		value := int(targetX.Int32)
 		unit.TargetX = &value
@@ -655,7 +784,39 @@ func scanUnit(row pgx.Row) (Unit, error) {
 		value := int(targetY.Int32)
 		unit.TargetY = &value
 	}
+	if targetUnitID.Valid {
+		unit.AttackTargetID = &targetUnitID.String
+	}
+	if attackTargetX.Valid {
+		value := int(attackTargetX.Int32)
+		unit.AttackTargetX = &value
+	}
+	if attackTargetY.Valid {
+		value := int(attackTargetY.Int32)
+		unit.AttackTargetY = &value
+	}
 	return unit, err
+}
+
+func loadUnits(ctx context.Context, tx pgx.Tx, lock bool) ([]Unit, error) {
+	query := `SELECT id, player_id, kind, x, y, target_x, target_y, health, target_unit_id, attack_target_x, attack_target_y FROM units ORDER BY player_id, id`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	units := make([]Unit, 0)
+	for rows.Next() {
+		unit, err := scanUnit(rows)
+		if err != nil {
+			return nil, err
+		}
+		units = append(units, unit)
+	}
+	return units, rows.Err()
 }
 
 func scanBuilding(row pgx.Row) (Building, error) {
@@ -667,6 +828,27 @@ func scanBuilding(row pgx.Row) (Building, error) {
 		building.CompletionTick = &value
 	}
 	return building, err
+}
+
+func loadBuildings(ctx context.Context, tx pgx.Tx, lock bool) ([]Building, error) {
+	query := `SELECT id, player_id, kind, x, y, width, height, status, started_tick, build_ticks, completion_tick FROM buildings ORDER BY player_id, id`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	buildings := make([]Building, 0)
+	for rows.Next() {
+		building, err := scanBuilding(rows)
+		if err != nil {
+			return nil, err
+		}
+		buildings = append(buildings, building)
+	}
+	return buildings, rows.Err()
 }
 
 func setBuildingProgress(building *Building, tick int64) {

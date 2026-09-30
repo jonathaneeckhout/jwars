@@ -35,9 +35,16 @@ var schemaStatements = []string{
 		kind TEXT NOT NULL,
 		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
 		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
+		health INTEGER NOT NULL DEFAULT 100 CHECK (health > 0),
 		target_x INTEGER CHECK (target_x >= 0 AND target_x < 1000),
 		target_y INTEGER CHECK (target_y >= 0 AND target_y < 1000),
-		CHECK ((target_x IS NULL) = (target_y IS NULL))
+		target_unit_id TEXT REFERENCES units(id) ON DELETE SET NULL,
+		attack_target_x INTEGER CHECK (attack_target_x >= 0 AND attack_target_x < 1000),
+		attack_target_y INTEGER CHECK (attack_target_y >= 0 AND attack_target_y < 1000),
+		CHECK ((target_x IS NULL) = (target_y IS NULL)),
+		CHECK ((attack_target_x IS NULL) = (attack_target_y IS NULL)),
+		CHECK (target_unit_id IS NULL OR (attack_target_x IS NOT NULL AND attack_target_y IS NOT NULL)),
+		CHECK (target_unit_id IS NULL OR (target_x IS NULL AND target_y IS NULL))
 	)`,
 	`CREATE INDEX IF NOT EXISTS units_player_id_idx ON units(player_id, id)`,
 	`CREATE INDEX IF NOT EXISTS units_target_idx ON units(id) WHERE target_x IS NOT NULL`,

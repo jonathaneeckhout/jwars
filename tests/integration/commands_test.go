@@ -10,7 +10,16 @@ import (
 func TestMoveCommand_AcceptsAndIsIdempotent(t *testing.T) {
 	player := newTestPlayer(t)
 	snapshot := getSnapshot(t, player)
-	unit := snapshot.Units[0]
+	var unit world.Unit
+	for _, candidate := range snapshot.Units {
+		if candidate.OwnerID == player.playerID {
+			unit = candidate
+			break
+		}
+	}
+	if unit.ID == "" {
+		t.Fatalf("snapshot has no units owned by %s: %+v", player.playerID, snapshot.Units)
+	}
 	command := world.Command{
 		ID:      "move-once",
 		Type:    "move",
