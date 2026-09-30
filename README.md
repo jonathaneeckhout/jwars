@@ -4,51 +4,71 @@ A persistent, server-authoritative RTS where players build bases and command uni
 
 ## Run locally
 
-Requires Go 1.23 or newer. The server creates a demo world, stores it in `data/world.json`, and advances units once per second.
+Requires Go 1.25 or newer, Docker Compose, `curl`, and `jq` for the helper scripts. The server creates a development player and token, persists the world in PostgreSQL, and advances it once per second.
 
 ```sh
-go run ./cmd/jwars
+./tools/run.sh
 ```
 
-The local development token is `dev-token`. Set `JWARS_API_TOKEN` before exposing the server anywhere beyond your own machine. Other settings:
+The first run creates `.env` from `.env.example` if needed, starts PostgreSQL with Docker Compose, and launches the server. Stop the server with Ctrl+C; the database remains running for the next start. Other Bash API helpers are also in `tools/`.
+
+The database schema is created by the server on startup. Migrations are intentionally omitted while the schema is evolving. To reset the disposable local database after a schema change:
+
+```sh
+docker compose down -v
+docker compose up -d db
+```
+
+That removes all local player and world data in the Compose database volume. The old `data/world.json` file is not imported.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `DATABASE_URL` | `postgres://jwars:jwars@127.0.0.1:5432/jwars?sslmode=disable` | PostgreSQL connection string |
 | `JWARS_ADDR` | `127.0.0.1:8080` | HTTP listen address |
-| `JWARS_API_TOKEN` | `dev-token` | Bearer token required by game endpoints |
-| `JWARS_PLAYER_ID` | `player-1` | Player served by this API instance |
-| `JWARS_DATA_FILE` | `data/world.json` | Local durable world state |
+| `JWARS_API_TOKEN` | `dev-token` | Development bearer token, stored as a SHA-256 hash |
+| `JWARS_PLAYER_ID` | `player-1` | Player associated with the development token |
+| `JWARS_BUILDING_DEFS` | `definitions/buildings.json` | Data-driven building definitions |
 
-## API slice
+## API
 
-Every game endpoint requires `Authorization: Bearer <token>`.
+All game endpoints require `Authorization: Bearer <token>`. The token resolves to a player; state, commands, and event cursors are player-scoped.
 
-Get the current player-visible snapshot:
+Get the current player-visible snapshot and available building definitions:
 
 ```sh
-curl -H 'Authorization: Bearer dev-token' http://localhost:8080/v1/world
+curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/world
+curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/buildings
 ```
 
-Issue a move order. Commands use stable unit IDs and a client-generated ID; repeating an ID returns the original result rather than applying the order again.
+Issue a move order. Commands use stable unit IDs and a client-generated ID; repeating the same ID for that player returns the original result.
 
 ```sh
-curl -X POST http://localhost:8080/v1/commands \
+curl -X POST http://127.0.0.1:8080/v1/commands \
   -H 'Authorization: Bearer dev-token' \
   -H 'Content-Type: application/json' \
-  -d '{"id":"order-001","type":"move","unit_ids":["worker-1"],"target":{"x":8,"y":5}}'
+  -d '{"id":"order-001","type":"move","unit_ids":["player-1-worker-1"],"target":{"x":8,"y":5}}'
 ```
 
-Follow ordered state updates. Pass `?after=<sequence>` when reconnecting; if the cursor is outside the retained replay window, the stream begins with a fresh snapshot.
+Issue a data-defined build order:
+
+```sh
+curl -X POST http://127.0.0.1:8080/v1/commands \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"build-001","type":"build","building_kind":"prototype","x":20,"y":20}'
+```
+
+Follow ordered updates. Pass `?after=<sequence>` when reconnecting; if the cursor is outside the retained replay window, the stream begins with a fresh snapshot.
 
 ```sh
 curl -N -H 'Authorization: Bearer dev-token' \
-  'http://localhost:8080/v1/events?after=0'
+  'http://127.0.0.1:8080/v1/events?after=0'
 ```
 
-Convenience Bash scripts for snapshots, listening, and move orders are in [`tools/`](tools/README.md).
-
-The prototype map is a 1000 by 1000 integer grid. Units move one tile per tick, preferring horizontal movement before vertical movement. Updates are player-scoped and have independent sequence numbers.
+Convenience Bash scripts for snapshots, listening, move orders, and builds are in [`tools/`](tools/README.md).
 
 ## Current scope
 
-This is an early single-process slice: one configured player, demo units, move orders, snapshots, replayable SSE updates, and atomic local JSON saves. The persistence code is isolated in the world package for a later PostgreSQL implementation. Combat, construction, resource production, account management, fog of war, and multi-instance operation are not implemented yet.
+The server stores players, token hashes, units, buildings, resources, command results, per-player event sequences, and a bounded event history in PostgreSQL. Tick and command writes are serialized by one Go process and persisted with their corresponding events in one transaction. Construction uses data-driven definitions; the included `prototype` definition is only a functional placeholder. World time pauses during server downtime and resumes from the last committed tick.
+
+There is no player registration flow, combat, fog of war, resource balancing, multi-process coordination, or automatic schema migration yet. The environment-seeded player/token is for local development; change it before using the server beyond localhost.

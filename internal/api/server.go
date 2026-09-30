@@ -1,27 +1,31 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jojo/jwars/internal/world"
 )
 
+type playerContextKey struct{}
+
 type Server struct {
-	world    *world.World
-	playerID string
-	token    string
+	world *world.World
 }
 
-func New(w *world.World, playerID, token string) http.Handler {
-	s := &Server{world: w, playerID: playerID, token: token}
+func New(w *world.World) http.Handler {
+	s := &Server{world: w}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("GET /v1/world", s.auth(http.HandlerFunc(s.getWorld)))
+	mux.Handle("GET /v1/definitions/buildings", s.auth(http.HandlerFunc(s.getBuildingDefinitions)))
 	mux.Handle("GET /v1/events", s.auth(http.HandlerFunc(s.events)))
 	mux.Handle("POST /v1/commands", s.auth(http.HandlerFunc(s.commands)))
 	return mux
@@ -29,36 +33,63 @@ func New(w *world.World, playerID, token string) http.Handler {
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" || r.Header.Get("Authorization") != "Bearer "+s.token {
+		const prefix = "Bearer "
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, prefix) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		playerID, err := s.world.PlayerForToken(r.Context(), strings.TrimPrefix(header, prefix))
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authentication service unavailable"})
+			return
+		}
+		ctx := context.WithValue(r.Context(), playerContextKey{}, playerID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func playerID(r *http.Request) string {
+	value, _ := r.Context().Value(playerContextKey{}).(string)
+	return value
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) getWorld(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.world.Snapshot(s.playerID))
+func (s *Server) getWorld(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.world.Snapshot(r.Context(), playerID(r))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load world state"})
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *Server) getBuildingDefinitions(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"buildings": s.world.BuildingDefinitions()})
 }
 
 func (s *Server) commands(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var command world.MoveCommand
+	var command world.Command
 	if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON command"})
 		return
 	}
-	result := s.world.ApplyMove(s.playerID, command)
+	result, err := s.world.ApplyCommand(r.Context(), playerID(r), command)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not persist command"})
+		return
+	}
 	status := http.StatusAccepted
 	if !result.Accepted {
 		status = http.StatusUnprocessableEntity
-		if strings.Contains(result.Reason, "persist") {
-			status = http.StatusInternalServerError
-		}
 	}
 	writeJSON(w, status, result)
 }
@@ -78,13 +109,21 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	deadline := time.NewTicker(250 * time.Millisecond)
-	defer deadline.Stop()
+	poll := time.NewTicker(250 * time.Millisecond)
+	defer poll.Stop()
+	lastKeepAlive := time.Now()
+	ownerID := playerID(r)
 
 	for {
-		updates, latest, oldest := s.world.UpdatesAfter(s.playerID, sequence)
-		if sequence > latest || (oldest != 0 && sequence+1 < oldest) {
-			snapshot := s.world.Snapshot(s.playerID)
+		updates, latest, oldest, err := s.world.EventsAfter(r.Context(), ownerID, sequence)
+		if err != nil {
+			return
+		}
+		if sequence > latest || (oldest > 0 && sequence < oldest-1) {
+			snapshot, err := s.world.Snapshot(r.Context(), ownerID)
+			if err != nil {
+				return
+			}
 			if err := writeEvent(w, flusher, snapshot.Sequence, "snapshot", snapshot); err != nil {
 				return
 			}
@@ -100,16 +139,17 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-deadline.C:
-			if len(updates) == 0 {
+		case <-poll.C:
+			if len(updates) == 0 && time.Since(lastKeepAlive) >= 15*time.Second {
 				_, _ = fmt.Fprint(w, ": keep-alive\n\n")
 				flusher.Flush()
+				lastKeepAlive = time.Now()
 			}
 		}
 	}
 }
 
-func parseCursor(r *http.Request) (uint64, error) {
+func parseCursor(r *http.Request) (int64, error) {
 	value := r.URL.Query().Get("after")
 	if value == "" {
 		value = r.Header.Get("Last-Event-ID")
@@ -117,11 +157,14 @@ func parseCursor(r *http.Request) (uint64, error) {
 	if value == "" {
 		return 0, nil
 	}
-	sequence, err := strconv.ParseUint(value, 10, 64)
-	return sequence, err
+	sequence, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || sequence < 0 {
+		return 0, strconv.ErrRange
+	}
+	return sequence, nil
 }
 
-func writeEvent(w http.ResponseWriter, flusher http.Flusher, sequence uint64, kind string, value any) error {
+func writeEvent(w http.ResponseWriter, flusher http.Flusher, sequence int64, kind string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
