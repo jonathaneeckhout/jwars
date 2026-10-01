@@ -20,6 +20,7 @@ var (
 	testPool             *pgxpool.Pool
 	testWorld            *world.World
 	testBuildingDefsPath string
+	testNow              = time.Now().UTC()
 )
 
 func TestMain(m *testing.M) {
@@ -65,7 +66,11 @@ func runTests(m *testing.M) int {
 	}
 
 	testBuildingDefsPath = filepath.Join("testdata", "buildings.json")
-	testWorld, err = world.New(testPool, testBuildingDefsPath)
+	testWorld, err = world.NewWithOptions(testPool, testBuildingDefsPath, world.Options{
+		Hill:          world.Point{X: 20, Y: 20},
+		HillRadius:    1,
+		Now:           func() time.Time { return testNow },
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create test world: %v\n", err)
 		return 1

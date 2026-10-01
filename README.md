@@ -38,6 +38,7 @@ Get the current player-visible snapshot and available building definitions:
 
 ```sh
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/world
+curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/scoreboard
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/buildings
 ```
 
@@ -82,7 +83,9 @@ curl -X POST http://127.0.0.1:8080/v1/commands \
 
 Workers cannot attack. Soldiers have 100 health and deal 20 damage per tick at one-tile range. Attackers pursue visible targets; when a target leaves vision, they move toward its last seen position and wait there until they see it again. Damage is applied simultaneously each tick. `units.damaged` and `units.destroyed` events report combat results. Units do not retaliate or heal automatically, and destroyed units do not respawn.
 
-Convenience Bash scripts for snapshots, listening, move and attack orders, and builds are in [`tools/`](tools/README.md).
+The current loop runs seven-day seasons around a fixed hill at (500, 500). Soldiers within its five-tile square control area score one point per minute when no rival soldiers are present; workers do not count and contested control awards no points. `/v1/scoreboard` reports the season, hill, standings, and previous result. Snapshots include the season, hill state, and the authenticated player's score. `hill.changed` and point-milestone `score.changed` events are ordered with the player's other events. When a season expires, the server records the result, resets the world tick, units, buildings, resources, and score, then begins the next season while retaining player identities and API tokens. See [`gameloop.md`](gameloop.md) for the current loop definition.
+
+Convenience Bash scripts for snapshots, scores and standings, listening, move and attack orders, and builds are in [`tools/`](tools/README.md).
 
 ## Current scope
 

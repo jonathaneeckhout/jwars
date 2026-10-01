@@ -15,6 +15,31 @@ var schemaStatements = []string{
 		singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
 		tick BIGINT NOT NULL DEFAULT 0 CHECK (tick >= 0)
 	)`,
+	`CREATE TABLE IF NOT EXISTS world_season (
+		singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+		season_number BIGINT NOT NULL CHECK (season_number > 0),
+		starts_at TIMESTAMPTZ NOT NULL,
+		ends_at TIMESTAMPTZ NOT NULL,
+		status TEXT NOT NULL CHECK (status = 'active')
+	)`,
+	`CREATE TABLE IF NOT EXISTS hill_state (
+		singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
+		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
+		control_radius INTEGER NOT NULL CHECK (control_radius >= 0),
+		owner_player_id TEXT,
+		contested BOOLEAN NOT NULL DEFAULT FALSE
+	)`,
+	`CREATE TABLE IF NOT EXISTS player_scores (
+		season_number BIGINT NOT NULL,
+		player_id TEXT NOT NULL,
+		control_ticks BIGINT NOT NULL DEFAULT 0 CHECK (control_ticks >= 0),
+		PRIMARY KEY (season_number, player_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS season_history (
+		season_number BIGINT PRIMARY KEY,
+		result JSONB NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS players (
 		player_id TEXT PRIMARY KEY,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -98,6 +123,13 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	if _, err := w.pool.Exec(ctx, `INSERT INTO world_meta (singleton, tick) VALUES (TRUE, 0) ON CONFLICT (singleton) DO NOTHING`); err != nil {
 		return fmt.Errorf("initialize world clock: %w", err)
 	}
+	now := w.now()
+	if _, err := w.pool.Exec(ctx, `INSERT INTO world_season (singleton,season_number,starts_at,ends_at,status) VALUES (TRUE,1,$1,$2,'active') ON CONFLICT (singleton) DO NOTHING`, now, now.Add(w.seasonDuration)); err != nil {
+		return fmt.Errorf("initialize season: %w", err)
+	}
+	if _, err := w.pool.Exec(ctx, `INSERT INTO hill_state (singleton,x,y,control_radius) VALUES (TRUE,$1,$2,$3) ON CONFLICT (singleton) DO NOTHING`, w.hill.X, w.hill.Y, w.hillRadius); err != nil {
+		return fmt.Errorf("initialize hill: %w", err)
+	}
 	if playerID == "" || token == "" {
 		return errors.New("development player id and API token must be non-empty")
 	}
@@ -108,6 +140,13 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `INSERT INTO players (player_id) VALUES ($1) ON CONFLICT (player_id) DO NOTHING`, playerID); err != nil {
+		return err
+	}
+	var seasonNumber int64
+	if err := tx.QueryRow(ctx, `SELECT season_number FROM world_season WHERE singleton=TRUE`).Scan(&seasonNumber); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO player_scores (season_number,player_id,control_ticks) VALUES ($1,$2,0) ON CONFLICT DO NOTHING`, seasonNumber, playerID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO player_resources (player_id, materials) VALUES ($1, 100) ON CONFLICT (player_id) DO NOTHING`, playerID); err != nil {

@@ -92,6 +92,11 @@ type Update struct {
 	Buildings []Building  `json:"buildings,omitempty"`
 	Resources []Resource  `json:"resources,omitempty"`
 	Entities  []EntityRef `json:"entities,omitempty"`
+	Score     *int64      `json:"score,omitempty"`
+	Season    *SeasonInfo `json:"season,omitempty"`
+	Hill      *HillState  `json:"hill,omitempty"`
+	Standings []Standing  `json:"standings,omitempty"`
+	Winners   []string    `json:"winners,omitempty"`
 }
 
 type EntityRef struct {
@@ -106,6 +111,9 @@ type Snapshot struct {
 	Units     []Unit     `json:"units"`
 	Buildings []Building `json:"buildings"`
 	Resources []Resource `json:"resources"`
+	Season    SeasonInfo `json:"season"`
+	Hill      HillState `json:"hill"`
+	Score     int64      `json:"score"`
 }
 
 type BuildingDefinition struct {
@@ -124,12 +132,20 @@ type definitionFile struct {
 }
 
 type World struct {
-	pool        *pgxpool.Pool
-	definitions map[string]BuildingDefinition
-	writer      sync.Mutex
+	pool           *pgxpool.Pool
+	definitions    map[string]BuildingDefinition
+	writer         sync.Mutex
+	hill           Point
+	hillRadius     int
+	seasonDuration time.Duration
+	clock          func() time.Time
 }
 
 func New(pool *pgxpool.Pool, definitionsPath string) (*World, error) {
+	return NewWithOptions(pool, definitionsPath, Options{})
+}
+
+func NewWithOptions(pool *pgxpool.Pool, definitionsPath string, options Options) (*World, error) {
 	content, err := os.ReadFile(definitionsPath)
 	if err != nil {
 		return nil, fmt.Errorf("read building definitions: %w", err)
@@ -154,7 +170,25 @@ func New(pool *pgxpool.Pool, definitionsPath string) (*World, error) {
 	if len(definitions) == 0 {
 		return nil, errors.New("building definitions must not be empty")
 	}
-	return &World{pool: pool, definitions: definitions}, nil
+	if options.Hill == (Point{}) {
+		options.Hill = Point{X: MapSize / 2, Y: MapSize / 2}
+	}
+	if options.Hill.X < 0 || options.Hill.X >= MapSize || options.Hill.Y < 0 || options.Hill.Y >= MapSize {
+		return nil, errors.New("hill must be inside the map")
+	}
+	if options.HillRadius == 0 {
+		options.HillRadius = 5
+	}
+	if options.HillRadius < 0 {
+		return nil, errors.New("hill radius must not be negative")
+	}
+	if options.SeasonDuration <= 0 {
+		options.SeasonDuration = DefaultSeasonDuration
+	}
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	return &World{pool: pool, definitions: definitions, hill: options.Hill, hillRadius: options.HillRadius, seasonDuration: options.SeasonDuration, clock: options.Now}, nil
 }
 
 func (w *World) BuildingDefinitions() []BuildingDefinition {
@@ -179,6 +213,17 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 	snapshot.PlayerID = playerID
 	if err := tx.QueryRow(ctx, `SELECT tick FROM world_meta WHERE singleton = TRUE`).Scan(&snapshot.Tick); err != nil {
 		return Snapshot{}, err
+	}
+	board, err := readScoreboard(ctx, tx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	snapshot.Season, snapshot.Hill = board.Season, board.Hill
+	for _, standing := range board.Standings {
+		if standing.PlayerID == playerID {
+			snapshot.Score = standing.Score
+			break
+		}
 	}
 	if err := tx.QueryRow(ctx, `SELECT sequence FROM player_sequences WHERE player_id = $1`, playerID).Scan(&snapshot.Sequence); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -321,15 +366,25 @@ func (w *World) Step(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT tick FROM world_meta WHERE singleton = TRUE FOR UPDATE`).Scan(&tick); err != nil {
 		return err
 	}
+	playerIDs, err := loadPlayerIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	due, err := seasonEndIfDue(ctx, tx, w.now())
+	if err != nil {
+		return err
+	}
+	if due {
+		if err := w.finishAndResetSeason(ctx, tx, playerIDs, w.now()); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	beforeUnits, err := loadUnits(ctx, tx, true)
 	if err != nil {
 		return err
 	}
 	beforeBuildings, err := loadBuildings(ctx, tx, true)
-	if err != nil {
-		return err
-	}
-	playerIDs, err := loadPlayerIDs(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -449,6 +504,9 @@ func (w *World) Step(ctx context.Context) error {
 	}
 	for i := range afterBuildings {
 		setBuildingProgress(&afterBuildings[i], tick)
+	}
+	if err := w.updateHillControl(ctx, tx, tick, playerIDs, afterUnits); err != nil {
+		return err
 	}
 	if err := emitWorldEvents(ctx, tx, tick, playerIDs, beforeUnits, beforeBuildings, afterUnits, afterBuildings, combatResult.destroyed); err != nil {
 		return err

@@ -31,6 +31,13 @@ This runs the HTTP and PostgreSQL integration suite in `tests/integration/` agai
 ./tools/state.sh
 ```
 
+Print your current season score as a number, or fetch the full standings:
+
+```sh
+./tools/score.sh
+./tools/scoreboard.sh
+```
+
 ## Listen for updates
 
 ```sh
