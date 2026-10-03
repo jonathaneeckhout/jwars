@@ -1,8 +1,10 @@
 package integration_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/jojo/jwars/internal/world"
 )
@@ -101,6 +103,123 @@ func TestTrainCommand_CompletesMeleeAndRangedTraining(t *testing.T) {
 		if trained == nil || trained.Kind != unitKind || trained.MaxHealth != unitMaxHealthForTest(unitKind) {
 			t.Fatalf("newly trained %s unit = %+v", unitKind, trained)
 		}
+	}
+}
+
+func TestTrainCommand_CreatesWorkerAtBaseAndConsumesMaterials(t *testing.T) {
+	player := newTestPlayer(t)
+	before := getSnapshot(t, player)
+	base := ownedBuildingByKind(t, before, player.playerID, "base")
+	workerCount := 0
+	for _, unit := range before.Units {
+		if unit.OwnerID == player.playerID && unit.Kind == "worker" {
+			workerCount++
+		}
+	}
+	materials := resourceAmount(t, before, "materials")
+
+	result := postCommand(t, player, world.Command{
+		ID: "train-worker-at-base", Type: "train", BuildingID: base.ID, UnitKind: "worker",
+	}, http.StatusAccepted)
+	if !result.Accepted {
+		t.Fatalf("worker training rejected: %+v", result)
+	}
+	afterStart := getSnapshot(t, player)
+	if got, want := resourceAmount(t, afterStart, "materials"), materials-1; got != want {
+		t.Fatalf("materials after starting worker training = %d, want %d", got, want)
+	}
+	if len(afterStart.Training) != 1 || afterStart.Training[0].UnitKind != "worker" || afterStart.Training[0].BuildingID != base.ID {
+		t.Fatalf("training queue = %+v, want one worker order at the base", afterStart.Training)
+	}
+	stepWorld(t, 6)
+	after := getSnapshot(t, player)
+	trainedWorkers := 0
+	for _, unit := range after.Units {
+		if unit.OwnerID == player.playerID && unit.Kind == "worker" {
+			trainedWorkers++
+		}
+	}
+	if trainedWorkers != workerCount+1 || len(after.Training) != 0 {
+		t.Fatalf("workers/training after completion = %d/%+v, want %d workers and empty queue", trainedWorkers, after.Training, workerCount+1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	updates, _, _, err := testWorld.EventsAfter(ctx, player.playerID, result.Sequence)
+	if err != nil {
+		t.Fatalf("read worker training events: %v", err)
+	}
+	completed := false
+	for _, event := range updates {
+		if event.Type == "training.completed" && len(event.Units) == 1 && event.Units[0].Kind == "worker" {
+			completed = true
+		}
+	}
+	if !completed {
+		t.Fatalf("worker training events = %+v, want training.completed with a worker", updates)
+	}
+}
+
+func TestWorkerRecovery_QueuesFreeWorkerWhenPlayerHasNoneAndCannotAffordOne(t *testing.T) {
+	player := newTestPlayer(t)
+	initial := getSnapshot(t, player)
+	if _, err := testPool.Exec(context.Background(), `UPDATE player_resources SET materials=0 WHERE player_id=$1`, player.playerID); err != nil {
+		t.Fatalf("set recovery test materials: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `DELETE FROM units WHERE player_id=$1 AND kind='worker'`, player.playerID); err != nil {
+		t.Fatalf("remove starting worker for recovery fixture: %v", err)
+	}
+	stepWorld(t, 1)
+	queued := getSnapshot(t, player)
+	if len(queued.Training) != 1 {
+		t.Fatalf("training queue after worker loss = %+v, want one recovery order", queued.Training)
+	}
+	order := queued.Training[0]
+	base := ownedBuildingByKind(t, queued, player.playerID, "base")
+	if order.UnitKind != "worker" || order.BuildingID != base.ID || order.CompletionTick-order.StartedTick != 30 {
+		t.Fatalf("worker recovery order = %+v, want free 30-tick order at base %s", order, base.ID)
+	}
+	if got := resourceAmount(t, queued, "materials"); got != 0 {
+		t.Fatalf("materials after automatic recovery = %d, want 0", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	updates, _, _, err := testWorld.EventsAfter(ctx, player.playerID, initial.Sequence)
+	if err != nil {
+		t.Fatalf("read recovery start event: %v", err)
+	}
+	started := false
+	for _, event := range updates {
+		if event.Type == "training.started" && len(event.Training) == 1 && event.Training[0].ID == order.ID {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf("recovery events = %+v, want training.started for recovery order", updates)
+	}
+
+	stepWorld(t, 30)
+	completed := getSnapshot(t, player)
+	workerCount := 0
+	for _, unit := range completed.Units {
+		if unit.OwnerID == player.playerID && unit.Kind == "worker" {
+			workerCount++
+		}
+	}
+	if workerCount != 1 || len(completed.Training) != 0 {
+		t.Fatalf("workers/training after recovery = %d/%+v, want one worker and empty queue", workerCount, completed.Training)
+	}
+	updates, _, _, err = testWorld.EventsAfter(ctx, player.playerID, initial.Sequence)
+	if err != nil {
+		t.Fatalf("read recovery completion event: %v", err)
+	}
+	recoveryCompleted := false
+	for _, event := range updates {
+		if event.Type == "training.completed" && len(event.Units) == 1 && event.Units[0].Kind == "worker" {
+			recoveryCompleted = true
+		}
+	}
+	if !recoveryCompleted {
+		t.Fatalf("recovery events = %+v, want training.completed with a worker", updates)
 	}
 }
 
