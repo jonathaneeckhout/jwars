@@ -27,7 +27,7 @@ func loadPlayerIDs(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return players, rows.Err()
 }
 
-func advanceCombatTick(ctx context.Context, tx pgx.Tx, beforeUnits []Unit, buildings []Building) (combatTickResult, error) {
+func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits []Unit, buildings []Building, deposits []ResourceDeposit) (combatTickResult, error) {
 	result := combatTickResult{destroyed: make([]Unit, 0)}
 	oldByID := make(map[string]Unit, len(beforeUnits))
 	currentByID := make(map[string]Unit, len(beforeUnits))
@@ -36,6 +36,10 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, beforeUnits []Unit, build
 		currentByID[unit.ID] = unit
 	}
 	oldVisible := make(map[string]map[entityKey]bool)
+	depositByID := make(map[string]ResourceDeposit, len(deposits))
+	for _, deposit := range deposits {
+		depositByID[deposit.ID] = deposit
+	}
 	for _, unit := range beforeUnits {
 		if _, exists := oldVisible[unit.OwnerID]; !exists {
 			oldVisible[unit.OwnerID] = visibleEntities(unit.OwnerID, beforeUnits, buildings)
@@ -63,6 +67,14 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, beforeUnits []Unit, build
 					}
 				}
 			}
+		} else if unit.GatherTargetID != nil {
+			deposit, exists := depositByID[*unit.GatherTargetID]
+			if !exists {
+				unit.GatherTargetID = nil
+				unit.GatherProgress = 0
+			} else if chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) > 1 {
+				unit.X, unit.Y = stepToward(unit.X, unit.Y, deposit.X, deposit.Y)
+			}
 		} else if unit.TargetX != nil && unit.TargetY != nil {
 			unit.X, unit.Y = stepToward(unit.X, unit.Y, *unit.TargetX, *unit.TargetY)
 			if unit.X == *unit.TargetX && unit.Y == *unit.TargetY {
@@ -80,6 +92,18 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, beforeUnits []Unit, build
 		}
 	}
 	damage := make(map[string]int)
+	if tick%5 == 0 {
+		for _, building := range buildings {
+			if building.Kind != "watchtower" || building.Status != "complete" {
+				continue
+			}
+			for _, unit := range postMove {
+				if unit.OwnerID != building.OwnerID && chebyshevToBuilding(unit.X, unit.Y, building) <= 4 {
+					damage[unit.ID] += 10
+				}
+			}
+		}
+	}
 	for _, unit := range postMove {
 		if unit.AttackTargetID == nil || unitAttackDamage(unit.Kind) == 0 {
 			continue
@@ -118,9 +142,9 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, beforeUnits []Unit, build
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE units SET x=$2, y=$3, health=$4, target_x=$5, target_y=$6,
-				target_unit_id=$7, attack_target_x=$8, attack_target_y=$9
+				target_unit_id=$7, attack_target_x=$8, attack_target_y=$9, gather_target_id=$10, gather_progress=$11
 			WHERE id=$1`, id, unit.X, unit.Y, unit.Health, unit.TargetX, unit.TargetY,
-			unit.AttackTargetID, unit.AttackTargetX, unit.AttackTargetY); err != nil {
+			unit.AttackTargetID, unit.AttackTargetX, unit.AttackTargetY, unit.GatherTargetID, unit.GatherProgress); err != nil {
 			return result, err
 		}
 	}
@@ -140,7 +164,7 @@ func valuesOfUnits(units map[string]Unit) []Unit {
 	return result
 }
 
-func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []string, beforeUnits []Unit, beforeBuildings []Building, afterUnits []Unit, afterBuildings []Building, destroyed []Unit) error {
+func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []string, beforeUnits []Unit, beforeBuildings []Building, afterUnits []Unit, afterBuildings []Building, beforeDeposits []ResourceDeposit, afterDeposits []ResourceDeposit, destroyed []Unit) error {
 	oldUnits := make(map[string]Unit, len(beforeUnits))
 	newUnits := make(map[string]Unit, len(afterUnits))
 	oldBuildings := make(map[string]Building, len(beforeBuildings))
@@ -151,6 +175,10 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 	for _, unit := range afterUnits {
 		newUnits[unit.ID] = unit
 	}
+	oldDeposits := make(map[string]ResourceDeposit, len(beforeDeposits))
+	newDeposits := make(map[string]ResourceDeposit, len(afterDeposits))
+	for _, deposit := range beforeDeposits { oldDeposits[deposit.ID] = deposit }
+	for _, deposit := range afterDeposits { newDeposits[deposit.ID] = deposit }
 	for _, building := range beforeBuildings {
 		oldBuildings[building.ID] = building
 	}
@@ -165,6 +193,20 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 	for _, playerID := range players {
 		wasVisible := visibleEntities(playerID, beforeUnits, beforeBuildings)
 		isVisible := visibleEntities(playerID, afterUnits, afterBuildings)
+		spottedDeposits := make([]ResourceDeposit, 0)
+		changedDeposits := make([]ResourceDeposit, 0)
+		for id, deposit := range newDeposits {
+			wasSeen := depositVisible(playerID, oldDeposits[id], beforeUnits, beforeBuildings)
+			isSeen := depositVisible(playerID, deposit, afterUnits, afterBuildings)
+			if !isSeen {
+				continue
+			}
+			if !wasSeen {
+				spottedDeposits = append(spottedDeposits, deposit)
+			} else if oldDeposits[id].Amount != deposit.Amount {
+				changedDeposits = append(changedDeposits, deposit)
+			}
+		}
 		spottedUnits := make([]Unit, 0)
 		spottedBuildings := make([]Building, 0)
 		hidden := make([]EntityRef, 0)
@@ -220,6 +262,11 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 				hidden = append(hidden, ref)
 			}
 		}
+		for id, deposit := range oldDeposits {
+			if depositVisible(playerID, deposit, beforeUnits, beforeBuildings) && !depositVisible(playerID, newDeposits[id], afterUnits, afterBuildings) {
+				hidden = append(hidden, EntityRef{ID: id, Type: "resource_deposit"})
+			}
+		}
 		for id, unit := range dead {
 			if unit.OwnerID == playerID || wasVisible[entityKey("unit:"+id)] {
 				destroyedUnits = append(destroyedUnits, enrichUnit(unit, playerID))
@@ -252,6 +299,16 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 		}
 		if len(spottedBuildings) > 0 {
 			if err := appendWorldEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "buildings.spotted", Buildings: spottedBuildings}); err != nil {
+				return err
+			}
+		}
+		if len(spottedDeposits) > 0 {
+			if err := appendWorldEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "resource_deposits.spotted", Deposits: spottedDeposits}); err != nil {
+				return err
+			}
+		}
+		if len(changedDeposits) > 0 {
+			if err := appendWorldEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "resource_deposits.changed", Deposits: changedDeposits}); err != nil {
 				return err
 			}
 		}

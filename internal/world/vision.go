@@ -6,16 +6,26 @@ func unitVisionRange(kind string) int {
 	switch kind {
 	case "worker", "soldier":
 		return 8
+	case "archer":
+		return 10
 	default:
 		return 0
 	}
 }
 
-func unitMaxHealth(string) int { return 100 }
+func unitMaxHealth(kind string) int {
+	if kind == "archer" {
+		return 60
+	}
+	return 100
+}
 
 func unitAttackDamage(kind string) int {
 	if kind == "soldier" {
 		return 20
+	}
+	if kind == "archer" {
+		return 10
 	}
 	return 0
 }
@@ -24,6 +34,9 @@ func unitAttackRange(kind string) int {
 	if kind == "soldier" {
 		return 1
 	}
+	if kind == "archer" {
+		return 4
+	}
 	return 0
 }
 
@@ -31,7 +44,10 @@ func buildingVisionRange(building Building) int {
 	if building.Status != "complete" {
 		return 0
 	}
-	if building.Kind == "base_core" {
+	if building.Kind == "base" || building.Kind == "base_core" {
+		return 12
+	}
+	if building.Kind == "watchtower" {
 		return 12
 	}
 	return 6
@@ -41,7 +57,8 @@ func enrichUnit(unit Unit, viewerID string) Unit {
 	unit.MaxHealth = unitMaxHealth(unit.Kind)
 	unit.VisionRange = unitVisionRange(unit.Kind)
 	if unit.OwnerID != viewerID {
-		unit.TargetX, unit.TargetY, unit.AttackTargetID = nil, nil, nil
+		unit.TargetX, unit.TargetY, unit.AttackTargetID, unit.GatherTargetID = nil, nil, nil, nil
+		unit.GatherProgress = 0
 	}
 	return unit
 }

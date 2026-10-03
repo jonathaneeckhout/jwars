@@ -191,6 +191,9 @@ func (w *World) finishAndResetSeason(ctx context.Context, tx pgx.Tx, players []s
 	if _, err := tx.Exec(ctx, `UPDATE player_resources SET materials=100`); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE resource_deposits SET amount=capacity`); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM player_scores`); err != nil {
 		return err
 	}

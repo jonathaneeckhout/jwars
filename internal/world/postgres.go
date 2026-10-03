@@ -54,6 +54,15 @@ var schemaStatements = []string{
 		player_id TEXT PRIMARY KEY REFERENCES players(player_id),
 		materials BIGINT NOT NULL DEFAULT 100 CHECK (materials >= 0)
 	)`,
+	`CREATE TABLE IF NOT EXISTS resource_deposits (
+		id TEXT PRIMARY KEY,
+		kind TEXT NOT NULL CHECK (kind = 'materials'),
+		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
+		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
+		amount INTEGER NOT NULL CHECK (amount >= 0),
+		capacity INTEGER NOT NULL CHECK (capacity > 0 AND amount <= capacity),
+		UNIQUE (x, y)
+	)`,
 	`CREATE TABLE IF NOT EXISTS units (
 		id TEXT PRIMARY KEY,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
@@ -64,6 +73,8 @@ var schemaStatements = []string{
 		target_x INTEGER CHECK (target_x >= 0 AND target_x < 1000),
 		target_y INTEGER CHECK (target_y >= 0 AND target_y < 1000),
 		target_unit_id TEXT REFERENCES units(id) ON DELETE SET NULL,
+		gather_target_id TEXT REFERENCES resource_deposits(id) ON DELETE SET NULL,
+		gather_progress SMALLINT NOT NULL DEFAULT 0 CHECK (gather_progress >= 0 AND gather_progress < 5),
 		attack_target_x INTEGER CHECK (attack_target_x >= 0 AND attack_target_x < 1000),
 		attack_target_y INTEGER CHECK (attack_target_y >= 0 AND attack_target_y < 1000),
 		CHECK ((target_x IS NULL) = (target_y IS NULL)),
@@ -91,6 +102,15 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS buildings_player_id_idx ON buildings(player_id, id)`,
 	`CREATE INDEX IF NOT EXISTS buildings_completion_idx ON buildings(completion_tick) WHERE status = 'constructing'`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS one_active_construction_per_player_idx ON buildings(player_id) WHERE status = 'constructing'`,
+	`CREATE TABLE IF NOT EXISTS training_orders (
+		id TEXT PRIMARY KEY,
+		player_id TEXT NOT NULL REFERENCES players(player_id),
+		building_id TEXT NOT NULL REFERENCES buildings(id) ON DELETE CASCADE,
+		unit_kind TEXT NOT NULL CHECK (unit_kind IN ('soldier', 'archer')),
+		started_tick BIGINT NOT NULL CHECK (started_tick >= 0),
+		completion_tick BIGINT NOT NULL CHECK (completion_tick > started_tick),
+		UNIQUE (building_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS player_sequences (
 		player_id TEXT PRIMARY KEY REFERENCES players(player_id),
 		sequence BIGINT NOT NULL CHECK (sequence >= 0)
@@ -130,6 +150,7 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	if _, err := w.pool.Exec(ctx, `INSERT INTO hill_state (singleton,x,y,control_radius) VALUES (TRUE,$1,$2,$3) ON CONFLICT (singleton) DO NOTHING`, w.hill.X, w.hill.Y, w.hillRadius); err != nil {
 		return fmt.Errorf("initialize hill: %w", err)
 	}
+	if err := w.seedResourceDeposits(ctx); err != nil { return fmt.Errorf("initialize resource deposits: %w", err) }
 	if playerID == "" || token == "" {
 		return errors.New("development player id and API token must be non-empty")
 	}

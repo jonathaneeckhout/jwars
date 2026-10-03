@@ -1,0 +1,264 @@
+package world
+
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5"
+)
+
+var initialDepositLocations = []Point{
+	{X: 20, Y: 12}, {X: 45, Y: 12}, {X: 150, Y: 150}, {X: 250, Y: 750},
+	{X: 400, Y: 400}, {X: 500, Y: 450}, {X: 500, Y: 550}, {X: 600, Y: 600},
+	{X: 750, Y: 250}, {X: 850, Y: 850}, {X: 950, Y: 50}, {X: 50, Y: 950},
+}
+
+const initialDepositCapacity = 500
+
+func (w *World) seedResourceDeposits(ctx context.Context) error {
+	var count int
+	if err := w.pool.QueryRow(ctx, `SELECT count(*) FROM resource_deposits`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, point := range initialDepositLocations {
+		id, err := newID()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO resource_deposits (id,kind,x,y,amount,capacity) VALUES ($1,'materials',$2,$3,$4,$4)`, id, point.X, point.Y, initialDepositCapacity); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func loadResourceDeposits(ctx context.Context, tx pgx.Tx) ([]ResourceDeposit, error) {
+	rows, err := tx.Query(ctx, `SELECT id,kind,x,y,amount,capacity FROM resource_deposits ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	deposits := make([]ResourceDeposit, 0)
+	for rows.Next() {
+		var deposit ResourceDeposit
+		if err := rows.Scan(&deposit.ID, &deposit.Kind, &deposit.X, &deposit.Y, &deposit.Amount, &deposit.Capacity); err != nil {
+			return nil, err
+		}
+		deposits = append(deposits, deposit)
+	}
+	return deposits, rows.Err()
+}
+
+func loadVisibleDeposits(ctx context.Context, tx pgx.Tx, playerID string) ([]ResourceDeposit, error) {
+	units, err := loadUnits(ctx, tx, false)
+	if err != nil {
+		return nil, err
+	}
+	buildings, err := loadBuildings(ctx, tx, false)
+	if err != nil {
+		return nil, err
+	}
+	deposits, err := loadResourceDeposits(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	visible := make([]ResourceDeposit, 0)
+	for _, deposit := range deposits {
+		if depositVisible(playerID, deposit, units, buildings) {
+			visible = append(visible, deposit)
+		}
+	}
+	return visible, nil
+}
+
+func depositVisible(playerID string, deposit ResourceDeposit, units []Unit, buildings []Building) bool {
+	for _, unit := range units {
+		if unit.OwnerID == playerID && chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) <= unitVisionRange(unit.Kind) {
+			return true
+		}
+	}
+	for _, building := range buildings {
+		if building.OwnerID == playerID && buildingVisionRange(building) > 0 && chebyshevToBuilding(deposit.X, deposit.Y, building) <= buildingVisionRange(building) {
+			return true
+		}
+	}
+	return false
+}
+
+func regenerateDeposits(ctx context.Context, tx pgx.Tx, tick int64) error {
+	if tick%60 != 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE resource_deposits SET amount=LEAST(capacity,amount+1) WHERE amount<capacity`)
+	return err
+}
+
+func loadTrainingOrders(ctx context.Context, tx pgx.Tx, playerID string, tick int64) ([]TrainingOrder, error) {
+	rows, err := tx.Query(ctx, `SELECT id,building_id,unit_kind,started_tick,completion_tick FROM training_orders WHERE player_id=$1 ORDER BY started_tick,id`, playerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orders := make([]TrainingOrder, 0)
+	for rows.Next() {
+		var order TrainingOrder
+		if err := rows.Scan(&order.ID, &order.BuildingID, &order.UnitKind, &order.StartedTick, &order.CompletionTick); err != nil {
+			return nil, err
+		}
+		duration := order.CompletionTick - order.StartedTick
+		order.ProgressPct = int((tick - order.StartedTick) * 100 / duration)
+		if order.ProgressPct > 100 {
+			order.ProgressPct = 100
+		}
+		orders = append(orders, order)
+	}
+	return orders, rows.Err()
+}
+
+func (w *World) completeTrainingOrders(ctx context.Context, tx pgx.Tx, tick int64) error {
+	rows, err := tx.Query(ctx, `SELECT id,player_id,building_id,unit_kind,started_tick,completion_tick FROM training_orders WHERE completion_tick <= $1 ORDER BY building_id FOR UPDATE`, tick)
+	if err != nil {
+		return err
+	}
+	type readyOrder struct {
+		order    TrainingOrder
+		playerID string
+	}
+	ready := make([]readyOrder, 0)
+	for rows.Next() {
+		var item readyOrder
+		if err := rows.Scan(&item.order.ID, &item.playerID, &item.order.BuildingID, &item.order.UnitKind, &item.order.StartedTick, &item.order.CompletionTick); err != nil {
+			rows.Close()
+			return err
+		}
+		ready = append(ready, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil { return err }
+	for _, item := range ready {
+		item.order.ProgressPct = 100
+		var building Building
+		if err := tx.QueryRow(ctx, `SELECT id,player_id,kind,x,y,width,height,status,started_tick,build_ticks FROM buildings WHERE id=$1`, item.order.BuildingID).Scan(&building.ID, &building.OwnerID, &building.Kind, &building.X, &building.Y, &building.Width, &building.Height, &building.Status, &building.StartedTick, &building.BuildTicks); err != nil {
+			return err
+		}
+		x, y, found, err := trainingSpawn(ctx, tx, building)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		unitID, err := newID()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO units (id,player_id,kind,x,y,health) VALUES ($1,$2,$3,$4,$5,$6)`, unitID, item.playerID, item.order.UnitKind, x, y, unitMaxHealth(item.order.UnitKind)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM training_orders WHERE id=$1`, item.order.ID); err != nil {
+			return err
+		}
+		unit := enrichUnit(Unit{ID: unitID, OwnerID: item.playerID, Kind: item.order.UnitKind, X: x, Y: y, Health: unitMaxHealth(item.order.UnitKind)}, item.playerID)
+		if err := appendWorldEvent(ctx, tx, Update{PlayerID: item.playerID, Tick: tick, Type: "training.completed", Units: []Unit{unit}, Training: []TrainingOrder{item.order}}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func trainingSpawn(ctx context.Context, tx pgx.Tx, barracks Building) (int, int, bool, error) {
+	units, err := loadUnits(ctx, tx, false)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	buildings, err := loadBuildings(ctx, tx, false)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	candidates := make([]Point, 0)
+	for offset := 0; offset < 16; offset++ {
+		candidates = append(candidates,
+			Point{X: barracks.X + offset, Y: barracks.Y - 1},
+			Point{X: barracks.X + offset, Y: barracks.Y + barracks.Height},
+			Point{X: barracks.X - 1, Y: barracks.Y + offset},
+			Point{X: barracks.X + barracks.Width, Y: barracks.Y + offset})
+	}
+	for _, point := range candidates {
+		if !insideMap(point.X, point.Y) {
+			continue
+		}
+		occupied := false
+		for _, unit := range units {
+			if unit.X == point.X && unit.Y == point.Y {
+				occupied = true
+				break
+			}
+		}
+		if occupied {
+			continue
+		}
+		for _, building := range buildings {
+			if point.X >= building.X && point.X < building.X+building.Width && point.Y >= building.Y && point.Y < building.Y+building.Height {
+				occupied = true
+				break
+			}
+		}
+		if !occupied {
+			return point.X, point.Y, true, nil
+		}
+	}
+	return 0, 0, false, nil
+}
+
+func advanceGathering(ctx context.Context, tx pgx.Tx, tick int64, units []Unit, deposits []ResourceDeposit) error {
+	depositByID := make(map[string]ResourceDeposit, len(deposits))
+	for _, deposit := range deposits {
+		depositByID[deposit.ID] = deposit
+	}
+	amounts := make(map[string]int)
+	for i := range units {
+		unit := &units[i]
+		if unit.Kind != "worker" || unit.GatherTargetID == nil {
+			continue
+		}
+		deposit, exists := depositByID[*unit.GatherTargetID]
+		if !exists {
+			unit.GatherTargetID = nil
+			unit.GatherProgress = 0
+		} else if chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) <= 1 {
+			unit.GatherProgress++
+			if unit.GatherProgress >= 5 {
+				unit.GatherProgress = 0
+				var remaining int
+				err := tx.QueryRow(ctx, `UPDATE resource_deposits SET amount=amount-1 WHERE id=$1 AND amount>0 RETURNING amount`, deposit.ID).Scan(&remaining)
+				if err == nil {
+					amounts[unit.OwnerID]++
+				} else if err != pgx.ErrNoRows {
+					return err
+				}
+			}
+		} else {
+			unit.GatherProgress = 0
+		}
+		if _, err := tx.Exec(ctx, `UPDATE units SET gather_target_id=$2,gather_progress=$3 WHERE id=$1`, unit.ID, unit.GatherTargetID, unit.GatherProgress); err != nil {
+			return err
+		}
+	}
+	for playerID, gained := range amounts {
+		var balance int64
+		if err := tx.QueryRow(ctx, `UPDATE player_resources SET materials=materials+$2 WHERE player_id=$1 RETURNING materials`, playerID, gained).Scan(&balance); err != nil {
+			return err
+		}
+		if err := appendWorldEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "resources.changed", Resources: []Resource{{Kind: "materials", Amount: balance}}}); err != nil {
+			return err
+		}
+	}
+	return nil
+}

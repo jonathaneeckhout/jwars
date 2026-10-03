@@ -19,10 +19,10 @@ The season starts when the world is first initialized. At the end of a season, t
 Players and their clients repeat this loop throughout the season:
 
 1. **Observe:** Read the player-visible snapshot and ordered world events. Enemy entities are visible only while within the player's vision.
-2. **Develop:** Expand the base and build up the forces needed to contest the objective. Economy and military strength help a player compete, but do not directly add to the score.
+2. **Develop:** Direct workers to gather materials from renewable deposits, build a barracks or watchtower, and train melee soldiers or archers. Economy and military strength help a player compete, but do not directly add to the score.
 3. **Scout and maneuver:** Use unit movement and limited vision to locate opponents, choose routes, and position forces.
-4. **Fight for the hill:** Give soldiers attack and movement orders to take or defend the single fixed hill at (500, 500). Its control area is a five-tile Chebyshev radius (a square). Workers do not control the hill.
-5. **Earn control points:** A player earns one point per 60 world ticks (currently one second per tick) while their soldiers control the hill uncontested. Rival soldiers in the control area make it contested, so nobody scores while it is contested.
+4. **Fight for the hill:** Give melee soldiers attack and movement orders to take or defend the single fixed hill at (500, 500). Its control area is a five-tile Chebyshev radius (a square). Workers and archers do not control the hill. Archers attack at range; watchtowers provide vision and automatic short-range defense.
+5. **Earn control points:** A player earns one point per 60 world ticks (currently one second per tick) while their melee soldiers control the hill uncontested. Rival melee soldiers in the control area make it contested, so nobody scores while it is contested.
 6. **Adapt:** React to events, changes in visibility, attacks, and opponents' attempts to take control. A client should make frequent tactical decisions; the player should not need to issue every order manually.
 
 Control points are banked permanently. Losing the hill stops future scoring but does not remove points already earned. The score is the total control points earned over the full seven-day season.
@@ -43,15 +43,16 @@ The scoreboard tracks each player's banked control points during the season. At 
 These are intentionally left for a later pass and must not be silently assumed while implementing the core loop:
 
 - How players enter a season and where their bases start.
-- How players gather resources and create or replace units.
 - What happens when units die and how a player recovers from losses.
 - Whether future scoring updates should be emitted more frequently than point milestones.
 
 ## MVP acceptance behavior
 
 - A season has one fixed hill, one cumulative control-point score per player, and a seven-day end time.
-- Only soldiers can establish and maintain hill control.
-- A player scores while they are the only player's soldiers in the hill's control area; presence by rival soldiers contests it and pauses scoring.
+- Only melee soldiers can establish and maintain hill control.
+- The economy has one material resource gathered by workers from visible deposits; deposits deplete and slowly regenerate.
+- The unit roster is workers, melee soldiers, and archers. Barracks train soldiers and archers; watchtowers attack nearby enemies and extend vision.
+- A player scores while they are the only player's melee soldiers in the hill's control area; presence by rival melee soldiers contests it and pauses scoring.
 - Points remain banked after control changes hands.
 - The scoreboard identifies the highest score and supports shared wins on a tie.
 - The world can continue the loop while a player's autonomous client operates without manual per-order input.

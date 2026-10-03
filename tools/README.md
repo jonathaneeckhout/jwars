@@ -63,16 +63,39 @@ Entity IDs are random opaque values. Discover them from a state snapshot or even
 
 The response includes the command ID and whether the server accepted the order. Rejections are printed with their reason and the script exits non-zero.
 
+## Gather materials
+
+Find a visible deposit and a worker in the snapshot, then order the worker to gather there:
+
+```sh
+./tools/state.sh | jq '{deposits, workers:[.units[] | select(.kind=="worker") | {id,x,y}]}'
+./tools/gather.sh <deposit-id> <worker-id> [worker-id ...]
+```
+
+Workers gather one material every five ticks while within one tile of the deposit. A new move or attack order cancels gathering.
+
+## Train units
+
+Build a barracks, wait for construction to finish, then train a soldier or archer:
+
+```sh
+./tools/state.sh | jq '.buildings[] | select(.kind=="barracks")'
+./tools/train.sh <barracks-id> soldier
+./tools/train.sh <barracks-id> archer
+```
+
+Snapshots show active training orders. `training.started` and `training.completed` arrive in the event stream.
+
 ## Attack an enemy unit
 
-Enemy units must currently be visible in your snapshot. Select a discovered enemy unit ID and one or more of your soldiers:
+Enemy units must currently be visible in your snapshot. Select a discovered enemy unit ID and one or more of your soldiers or archers:
 
 ```sh
 ./tools/state.sh | jq '.units[] | {id, owner_id, kind, x, y, health}'
-./tools/attack.sh <enemy-unit-id> <soldier-id> [soldier-id ...]
+./tools/attack.sh <enemy-unit-id> <soldier-or-archer-id> [unit-id ...]
 ```
 
-Soldiers deal 20 damage per tick at a range of one tile. Workers cannot attack. Attackers pursue visible targets and move toward a target's last seen position if it leaves vision. Snapshots include your entities and currently visible enemy entities; `entities.hidden` events tell listeners when an enemy leaves vision.
+Melee soldiers deal 20 damage per tick at one-tile range; archers deal 10 at four-tile range. Workers cannot attack. Attackers pursue visible targets and move toward a target's last seen position if it leaves vision. Snapshots include your entities and currently visible enemy entities; `entities.hidden` events tell listeners when an enemy leaves vision.
 
 ## Build a structure
 
@@ -81,7 +104,8 @@ List the server-defined building types, then issue a build order with a type and
 ```sh
 curl -H "Authorization: Bearer $JWARS_API_TOKEN" \
   "$JWARS_API_URL/v1/definitions/buildings" | jq .
-./tools/build.sh prototype 20 20
+./tools/build.sh barracks 20 20
+./tools/build.sh watchtower 24 20
 ```
 
 The server validates the definition, resource balance, queue, footprint, and map occupancy. The response confirms the accepted order. `listen.sh` receives `buildings.progress` events at 25%, 50%, and 75%, then a `buildings.completed` event at 100%. The state snapshot includes exact current progress between events.

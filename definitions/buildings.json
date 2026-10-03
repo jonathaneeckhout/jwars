@@ -1,7 +1,7 @@
 {
   "buildings": [
     {
-      "kind": "base_core",
+      "kind": "base",
       "width": 3,
       "height": 3,
       "cost": 0,
@@ -10,10 +10,17 @@
       "start_y": 10
     },
     {
-      "kind": "prototype",
+      "kind": "barracks",
+      "width": 3,
+      "height": 3,
+      "cost": 50,
+      "build_ticks": 60
+    },
+    {
+      "kind": "watchtower",
       "width": 1,
       "height": 1,
-      "cost": 10,
+      "cost": 35,
       "build_ticks": 30
     }
   ]
