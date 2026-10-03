@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 type UnitDefinition struct {
@@ -42,6 +44,11 @@ type WorldSettings struct {
 	HillRadius            int            `json:"hill_radius"`
 	TicksPerControlPoint  int64          `json:"ticks_per_control_point"`
 	SeasonDurationSeconds int64          `json:"season_duration_seconds"`
+	SeasonStartWeekday    string         `json:"season_start_weekday"`
+	SeasonStartTimeUTC    string         `json:"season_start_time_utc"`
+	EnrollmentHours       int            `json:"enrollment_hours"`
+	MaxPlayers            int            `json:"max_players"`
+	SpawnLocations        []Point        `json:"spawn_locations"`
 	StartingUnits         []StartingUnit `json:"starting_units"`
 }
 
@@ -55,8 +62,8 @@ type GameConfig struct {
 func LoadConfig(directory string) (GameConfig, error) {
 	var config GameConfig
 	for _, file := range []struct {
-		name   string
-		target any
+		name     string
+		target   any
 		required []string
 	}{
 		{name: "buildings.json", required: []string{"buildings"}, target: &struct {
@@ -66,7 +73,7 @@ func LoadConfig(directory string) (GameConfig, error) {
 			Units *[]UnitDefinition `json:"units"`
 		}{Units: &config.Units}},
 		{name: "economy.json", required: []string{"starting_materials", "gather_interval_ticks", "gather_range", "deposit_capacity", "deposit_regeneration_interval_ticks", "deposit_regeneration_amount", "deposit_locations"}, target: &config.Economy},
-		{name: "world.json", required: []string{"map_size", "tick_interval_millis", "hill", "hill_radius", "ticks_per_control_point", "season_duration_seconds", "starting_units"}, target: &config.World},
+		{name: "world.json", required: []string{"map_size", "tick_interval_millis", "hill", "hill_radius", "ticks_per_control_point", "season_duration_seconds", "season_start_weekday", "season_start_time_utc", "enrollment_hours", "max_players", "spawn_locations", "starting_units"}, target: &config.World},
 	} {
 		content, err := os.ReadFile(filepath.Join(directory, file.name))
 		if err != nil {
@@ -96,6 +103,18 @@ func LoadConfig(directory string) (GameConfig, error) {
 func (c GameConfig) Validate() error {
 	if c.World.MapSize < 1 || c.World.TickIntervalMillis < 1 || c.World.TicksPerControlPoint < 1 || c.World.SeasonDurationSeconds < 1 {
 		return fmt.Errorf("world map size, tick interval, scoring interval, and season duration must be positive")
+	}
+	if c.World.SeasonDurationSeconds != int64((7 * 24 * time.Hour).Seconds()) {
+		return fmt.Errorf("season duration must be exactly seven days")
+	}
+	if _, err := time.Parse("15:04", c.World.SeasonStartTimeUTC); err != nil {
+		return fmt.Errorf("season_start_time_utc must use 24-hour HH:MM format")
+	}
+	if weekday, ok := parseWeekday(c.World.SeasonStartWeekday); !ok || strings.ToLower(weekday.String()) != c.World.SeasonStartWeekday {
+		return fmt.Errorf("season_start_weekday must be a lowercase weekday name")
+	}
+	if c.World.EnrollmentHours < 1 || c.World.EnrollmentHours >= 168 || c.World.MaxPlayers < 1 || c.World.MaxPlayers > len(c.World.SpawnLocations) {
+		return fmt.Errorf("world enrollment hours, max players, and spawn locations are invalid")
 	}
 	if !c.World.contains(c.World.Hill.X, c.World.Hill.Y) || c.World.HillRadius < 0 {
 		return fmt.Errorf("world hill must be within the map and have a non-negative radius")
@@ -131,8 +150,11 @@ func (c GameConfig) Validate() error {
 
 	buildings := make(map[string]BuildingDefinition, len(c.Buildings))
 	for _, building := range c.Buildings {
-		if building.Kind == "" || building.Width < 1 || building.Height < 1 || building.Width > c.World.MapSize || building.Height > c.World.MapSize || building.Cost < 0 || building.BuildTicks < 0 || building.VisionRange < 0 || building.AttackDamage < 0 || building.AttackRange < 0 || building.AttackIntervalTicks < 0 {
+		if building.Kind == "" || building.Width < 1 || building.Height < 1 || building.Width > c.World.MapSize || building.Height > c.World.MapSize || building.Cost < 0 || building.BuildTicks < 0 || building.VisionRange < 0 || building.AttackDamage < 0 || building.AttackRange < 0 || building.AttackIntervalTicks < 0 || building.MaxHealth < 0 {
 			return fmt.Errorf("invalid building definition %q", building.Kind)
+		}
+		if building.Destructible != (building.MaxHealth > 0) || (building.Starting && building.Destructible) {
+			return fmt.Errorf("building %q must have positive max_health exactly when destructible, and starting buildings must be indestructible", building.Kind)
 		}
 		if _, exists := buildings[building.Kind]; exists {
 			return fmt.Errorf("duplicate building definition %q", building.Kind)
@@ -155,14 +177,43 @@ func (c GameConfig) Validate() error {
 	for _, unit := range units {
 		if unit.TrainingTicks > 0 {
 			building, exists := buildings[unit.TrainingBuilding]
-			if !exists || building.Starting {
-				return fmt.Errorf("unit %q has an unknown or non-buildable training building %q", unit.Kind, unit.TrainingBuilding)
+			if !exists || (building.Starting && unit.Kind != "worker") {
+				return fmt.Errorf("unit %q has an unknown or unsupported training building %q", unit.Kind, unit.TrainingBuilding)
 			}
 		}
 	}
+	startingBuilding, hasStartingBuilding := BuildingDefinition{}, false
+	for _, building := range c.Buildings {
+		if building.Starting {
+			startingBuilding, hasStartingBuilding = building, true
+			break
+		}
+	}
+	if !hasStartingBuilding {
+		return fmt.Errorf("at least one starting building is required")
+	}
+	spawnSeen := make(map[Point]bool, len(c.World.SpawnLocations))
+	spawnDistance := -1
+	for _, spawn := range c.World.SpawnLocations {
+		if spawn.X < 0 || spawn.Y < 0 || spawn.X+startingBuilding.StartX+startingBuilding.Width > c.World.MapSize || spawn.Y+startingBuilding.StartY+startingBuilding.Height > c.World.MapSize || spawnSeen[spawn] {
+			return fmt.Errorf("invalid or duplicate spawn location at (%d,%d)", spawn.X, spawn.Y)
+		}
+		spawnSeen[spawn] = true
+		distance := max(abs(spawn.X-c.World.Hill.X), abs(spawn.Y-c.World.Hill.Y))
+		if spawnDistance < 0 {
+			spawnDistance = distance
+		} else if distance != spawnDistance {
+			return fmt.Errorf("spawn locations must be equally distant from the hill")
+		}
+	}
 	for _, unit := range c.World.StartingUnits {
-		if _, exists := units[unit.Kind]; !exists || !c.World.contains(unit.X, unit.Y) {
-			return fmt.Errorf("invalid starting unit %q at (%d,%d)", unit.Kind, unit.X, unit.Y)
+		if _, exists := units[unit.Kind]; !exists || unit.X < 0 || unit.Y < 0 || unit.X >= c.World.MapSize || unit.Y >= c.World.MapSize {
+			return fmt.Errorf("invalid starting unit offset %q at (%d,%d)", unit.Kind, unit.X, unit.Y)
+		}
+		for _, spawn := range c.World.SpawnLocations {
+			if !c.World.contains(spawn.X+unit.X, spawn.Y+unit.Y) {
+				return fmt.Errorf("starting unit %q is outside the map at spawn (%d,%d)", unit.Kind, spawn.X, spawn.Y)
+			}
 		}
 	}
 	if len(c.World.StartingUnits) == 0 {
@@ -178,7 +229,28 @@ func (c GameConfig) Validate() error {
 		}
 		seenDeposits[point] = true
 	}
+	for _, spawn := range c.World.SpawnLocations {
+		nearest := c.World.MapSize
+		for _, deposit := range c.Economy.DepositLocations {
+			distance := max(abs(spawn.X-deposit.X), abs(spawn.Y-deposit.Y))
+			if distance < nearest {
+				nearest = distance
+			}
+		}
+		if nearest > 10 {
+			return fmt.Errorf("spawn location at (%d,%d) has no nearby material deposit", spawn.X, spawn.Y)
+		}
+	}
 	return nil
+}
+
+func parseWeekday(value string) (time.Weekday, bool) {
+	for day := time.Sunday; day <= time.Saturday; day++ {
+		if strings.EqualFold(day.String(), value) {
+			return day, true
+		}
+	}
+	return 0, false
 }
 
 func (w WorldSettings) contains(x, y int) bool {

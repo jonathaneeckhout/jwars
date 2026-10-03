@@ -6,8 +6,9 @@
       "vision_range": 8,
       "attack_damage": 0,
       "attack_range": 0,
-      "training_cost": 0,
-      "training_ticks": 0
+      "training_cost": 1,
+      "training_ticks": 6,
+      "training_building": "base"
     },
     {
       "kind": "soldier",

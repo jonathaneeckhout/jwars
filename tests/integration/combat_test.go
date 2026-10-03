@@ -32,7 +32,12 @@ func TestAttackCommand_DamagesVisibleEnemyAndEmitsEvent(t *testing.T) {
 	player := newTestPlayer(t)
 	enemy := newTestPlayer(t)
 	snapshot := getSnapshot(t, player)
-	attackerID, targetID := ownedUnitID(t, snapshot, player.playerID, "soldier"), ownedUnitID(t, snapshot, enemy.playerID, "soldier")
+	attacker := ownedUnit(t, snapshot, player.playerID, "soldier")
+	targetID := ownedUnitID(t, snapshot, enemy.playerID, "soldier")
+	// Spawn sites are randomized and this test only asserts the damage step,
+	// so put the target within the soldier's one-tile attack range first.
+	positionUnit(t, targetID, attacker.X+1, attacker.Y)
+	attackerID := attacker.ID
 	result := postCommand(t, player, world.Command{
 		ID: "attack-visible-enemy", Type: "attack", UnitIDs: []string{attackerID}, TargetUnitID: targetID,
 	}, http.StatusAccepted)
@@ -75,8 +80,10 @@ func TestCombat_DestroyedUnitsAreRemovedAndEmitEvent(t *testing.T) {
 	player := newTestPlayer(t)
 	enemy := newTestPlayer(t)
 	snapshot := getSnapshot(t, player)
-	attackerID := ownedUnitID(t, snapshot, player.playerID, "soldier")
+	attacker := ownedUnit(t, snapshot, player.playerID, "soldier")
 	targetID := ownedUnitID(t, snapshot, enemy.playerID, "soldier")
+	positionUnit(t, targetID, attacker.X+1, attacker.Y)
+	attackerID := attacker.ID
 	result := postCommand(t, player, world.Command{
 		ID: "attack-until-destroyed", Type: "attack", UnitIDs: []string{attackerID}, TargetUnitID: targetID,
 	}, http.StatusAccepted)
@@ -148,14 +155,25 @@ func TestWorldSnapshot_HidesEnemiesOutsideVisionAndEmitsHiddenEvent(t *testing.T
 }
 
 func ownedUnitID(t *testing.T, snapshot world.Snapshot, ownerID, kind string) string {
+	return ownedUnit(t, snapshot, ownerID, kind).ID
+}
+
+func ownedUnit(t *testing.T, snapshot world.Snapshot, ownerID, kind string) world.Unit {
 	t.Helper()
 	for _, unit := range snapshot.Units {
 		if unit.OwnerID == ownerID && unit.Kind == kind {
-			return unit.ID
+			return unit
 		}
 	}
 	t.Fatalf("%s has no visible %s in snapshot", ownerID, kind)
-	return ""
+	return world.Unit{}
+}
+
+func positionUnit(t *testing.T, unitID string, x, y int) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `UPDATE units SET x=$2,y=$3 WHERE id=$1`, unitID, x, y); err != nil {
+		t.Fatalf("position unit %s for combat fixture: %v", unitID, err)
+	}
 }
 
 func unitByID(t *testing.T, snapshot world.Snapshot, id string) world.Unit {

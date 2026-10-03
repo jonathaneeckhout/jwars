@@ -2,12 +2,15 @@ package world
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 var schemaStatements = []string{
@@ -44,6 +47,13 @@ var schemaStatements = []string{
 		player_id TEXT PRIMARY KEY,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+	`CREATE TABLE IF NOT EXISTS season_players (
+		season_number BIGINT NOT NULL,
+		player_id TEXT NOT NULL REFERENCES players(player_id),
+		spawn_index INTEGER NOT NULL,
+		joined_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (season_number, player_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS api_tokens (
 		token_hash BYTEA PRIMARY KEY,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
@@ -73,6 +83,7 @@ var schemaStatements = []string{
 		target_x INTEGER CHECK (target_x >= 0),
 		target_y INTEGER CHECK (target_y >= 0),
 		target_unit_id TEXT REFERENCES units(id) ON DELETE SET NULL,
+		target_building_id TEXT,
 		gather_target_id TEXT REFERENCES resource_deposits(id) ON DELETE SET NULL,
 		gather_progress INTEGER NOT NULL DEFAULT 0 CHECK (gather_progress >= 0),
 		attack_target_x INTEGER CHECK (attack_target_x >= 0),
@@ -96,9 +107,12 @@ var schemaStatements = []string{
 		started_tick BIGINT NOT NULL DEFAULT 0 CHECK (started_tick >= 0),
 		build_ticks BIGINT NOT NULL DEFAULT 0 CHECK (build_ticks >= 0),
 		completion_tick BIGINT,
+		health INTEGER NOT NULL DEFAULT 0 CHECK (health >= 0),
 		CHECK ((status = 'constructing' AND completion_tick IS NOT NULL AND completion_tick = started_tick + build_ticks AND build_ticks > 0) OR (status = 'complete' AND completion_tick IS NULL)),
 		CHECK (x >= 0 AND y >= 0)
 	)`,
+	`ALTER TABLE units ADD COLUMN IF NOT EXISTS target_building_id TEXT`,
+	`ALTER TABLE buildings ADD COLUMN IF NOT EXISTS health INTEGER NOT NULL DEFAULT 0 CHECK (health >= 0)`,
 	`CREATE INDEX IF NOT EXISTS buildings_player_id_idx ON buildings(player_id, id)`,
 	`CREATE INDEX IF NOT EXISTS buildings_completion_idx ON buildings(completion_tick) WHERE status = 'constructing'`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS one_active_construction_per_player_idx ON buildings(player_id) WHERE status = 'constructing'`,
@@ -140,11 +154,19 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 			return fmt.Errorf("initialize schema: %w", err)
 		}
 	}
+	for _, definition := range w.definitions {
+		if definition.Destructible {
+			if _, err := w.pool.Exec(ctx, `UPDATE buildings SET health=$1 WHERE kind=$2 AND health=0`, definition.MaxHealth, definition.Kind); err != nil {
+				return fmt.Errorf("initialize building health for %s: %w", definition.Kind, err)
+			}
+		}
+	}
 	if _, err := w.pool.Exec(ctx, `INSERT INTO world_meta (singleton, tick) VALUES (TRUE, 0) ON CONFLICT (singleton) DO NOTHING`); err != nil {
 		return fmt.Errorf("initialize world clock: %w", err)
 	}
 	now := w.now()
-	if _, err := w.pool.Exec(ctx, `INSERT INTO world_season (singleton,season_number,starts_at,ends_at,status) VALUES (TRUE,1,$1,$2,'active') ON CONFLICT (singleton) DO NOTHING`, now, now.Add(w.seasonDuration)); err != nil {
+	seasonStart := seasonStartForNewWorld(now, w.config.World)
+	if _, err := w.pool.Exec(ctx, `INSERT INTO world_season (singleton,season_number,starts_at,ends_at,status) VALUES (TRUE,1,$1,$2,'active') ON CONFLICT (singleton) DO NOTHING`, seasonStart, seasonStart.Add(w.seasonDuration)); err != nil {
 		return fmt.Errorf("initialize season: %w", err)
 	}
 	if _, err := w.pool.Exec(ctx, `INSERT INTO hill_state (singleton,x,y,control_radius) VALUES (TRUE,$1,$2,$3) ON CONFLICT (singleton) DO NOTHING`, w.hill.X, w.hill.Y, w.hillRadius); err != nil {
@@ -167,6 +189,20 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	}
 	var seasonNumber int64
 	if err := tx.QueryRow(ctx, `SELECT season_number FROM world_season WHERE singleton=TRUE`).Scan(&seasonNumber); err != nil {
+		return err
+	}
+	var spawnIndex int
+	err = tx.QueryRow(ctx, `SELECT spawn_index FROM season_players WHERE season_number=$1 AND player_id=$2`, seasonNumber, playerID).Scan(&spawnIndex)
+	newSeasonPlayer := errors.Is(err, pgx.ErrNoRows)
+	if errors.Is(err, pgx.ErrNoRows) {
+		spawnIndex, err = w.nextSpawnIndex(ctx, tx, seasonNumber, playerID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO season_players (season_number,player_id,spawn_index,joined_at) VALUES ($1,$2,$3,$4)`, seasonNumber, playerID, spawnIndex, now); err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO player_scores (season_number,player_id,control_ticks) VALUES ($1,$2,0) ON CONFLICT DO NOTHING`, seasonNumber, playerID); err != nil {
@@ -194,46 +230,71 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM units WHERE player_id = $1`, playerID).Scan(&unitCount); err != nil {
 		return err
 	}
-	if unitCount == 0 {
-		for _, startingUnit := range w.config.World.StartingUnits {
-			unit := Unit{OwnerID: playerID, Kind: startingUnit.Kind, X: startingUnit.X, Y: startingUnit.Y}
-			unit.ID, err = newID()
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `INSERT INTO units (id, player_id, kind, x, y, health) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`, unit.ID, playerID, unit.Kind, unit.X, unit.Y, w.unitMaxHealth(unit.Kind)); err != nil {
-				return err
-			}
-		}
-	}
-
 	var buildingCount int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM buildings WHERE player_id = $1`, playerID).Scan(&buildingCount); err != nil {
 		return err
 	}
-	if buildingCount == 0 {
-		for _, definition := range w.definitions {
-			if !definition.Starting {
-				continue
-			}
-			buildingID, err := newID()
-			if err != nil {
+	spawn := w.config.World.SpawnLocations[spawnIndex]
+	if newSeasonPlayer {
+		if unitCount == 0 {
+			if err := w.seedStartingUnits(ctx, tx, playerID, spawn); err != nil {
 				return err
 			}
-			building := Building{
-				ID: buildingID, OwnerID: playerID,
-				Kind: definition.Kind, X: definition.StartX, Y: definition.StartY,
-				Width: definition.Width, Height: definition.Height, Status: "complete",
-			}
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO buildings (id, player_id, kind, x, y, width, height, status)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,'complete') ON CONFLICT (id) DO NOTHING`,
-				building.ID, playerID, building.Kind, building.X, building.Y, building.Width, building.Height); err != nil {
+		}
+		if buildingCount == 0 {
+			if err := w.seedStartingBuildings(ctx, tx, playerID, spawn); err != nil {
 				return err
 			}
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func (w *World) nextSpawnIndex(ctx context.Context, tx pgx.Tx, seasonNumber int64, playerID string) (int, error) {
+	rows, err := tx.Query(ctx, `SELECT spawn_index FROM season_players WHERE season_number=$1`, seasonNumber)
+	if err != nil {
+		return 0, err
+	}
+	used := make(map[int]bool)
+	for rows.Next() {
+		var index int
+		if err := rows.Scan(&index); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		used[index] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	available := make([]int, 0, len(w.config.World.SpawnLocations))
+	for index := range w.config.World.SpawnLocations {
+		if !used[index] {
+			available = append(available, index)
+		}
+	}
+	var previousIndex pgtype.Int4
+	if err := tx.QueryRow(ctx, `SELECT spawn_index FROM season_players WHERE player_id=$1 AND season_number<$2 ORDER BY season_number DESC LIMIT 1`, playerID, seasonNumber).Scan(&previousIndex); err == nil && previousIndex.Valid && len(available) > 1 {
+		rotated := available[:0]
+		for _, index := range available {
+			if index != int(previousIndex.Int32) {
+				rotated = append(rotated, index)
+			}
+		}
+		available = rotated
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+	if len(available) == 0 {
+		// Initialize is a local development bootstrap and can coexist with API-created players.
+		return int(seasonNumber % int64(len(w.config.World.SpawnLocations))), nil
+	}
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return 0, err
+	}
+	return available[binary.LittleEndian.Uint64(random[:])%uint64(len(available))], nil
 }
 
 func (w *World) PlayerForToken(ctx context.Context, token string) (string, error) {

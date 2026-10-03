@@ -24,6 +24,9 @@ func New(w *world.World) http.Handler {
 	s := &Server{world: w}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /v1/seasons/current", s.currentSeason)
+	mux.HandleFunc("POST /v1/players", s.registerPlayer)
+	mux.Handle("POST /v1/seasons/current/join", s.auth(http.HandlerFunc(s.joinSeason)))
 	mux.Handle("GET /v1/world", s.auth(http.HandlerFunc(s.getWorld)))
 	mux.Handle("GET /v1/scoreboard", s.auth(http.HandlerFunc(s.scoreboard)))
 	mux.Handle("GET /v1/definitions/buildings", s.auth(http.HandlerFunc(s.getBuildingDefinitions)))
@@ -62,6 +65,41 @@ func playerID(r *http.Request) string {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) currentSeason(w http.ResponseWriter, r *http.Request) {
+	status, err := s.world.CurrentSeason(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load current season"})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) registerPlayer(w http.ResponseWriter, r *http.Request) {
+	registration, err := s.world.RegisterPlayer(r.Context())
+	if errors.Is(err, world.ErrEnrollmentClosed) || errors.Is(err, world.ErrSeasonFull) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not register player"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, registration)
+}
+
+func (s *Server) joinSeason(w http.ResponseWriter, r *http.Request) {
+	joined, err := s.world.JoinSeason(r.Context(), playerID(r))
+	if errors.Is(err, world.ErrEnrollmentClosed) || errors.Is(err, world.ErrSeasonFull) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not join current season"})
+		return
+	}
+	writeJSON(w, http.StatusOK, joined)
 }
 
 func (s *Server) getWorld(w http.ResponseWriter, r *http.Request) {

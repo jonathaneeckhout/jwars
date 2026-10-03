@@ -37,14 +37,17 @@ func (w *World) enrichUnit(unit Unit, viewerID string) Unit {
 	unit.MaxHealth = w.unitMaxHealth(unit.Kind)
 	unit.VisionRange = w.unitVisionRange(unit.Kind)
 	if unit.OwnerID != viewerID {
-		unit.TargetX, unit.TargetY, unit.AttackTargetID, unit.GatherTargetID = nil, nil, nil, nil
+		unit.TargetX, unit.TargetY, unit.AttackTargetID, unit.AttackTargetBuildingID, unit.GatherTargetID = nil, nil, nil, nil, nil
 		unit.GatherProgress = 0
 	}
 	return unit
 }
 
 func (w *World) enrichBuilding(building Building) Building {
+	definition := w.buildingDefinition(building.Kind)
 	building.VisionRange = w.buildingVisionRange(building)
+	building.Destructible = definition.Destructible
+	building.MaxHealth = definition.MaxHealth
 	return building
 }
 

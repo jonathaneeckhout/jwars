@@ -94,6 +94,8 @@ func TestHillControl_ScoresAndSeasonResetPreservesWinner(t *testing.T) {
 	defer func() { testNow = originalTime }()
 	testNow = scoreboard.Season.EndsAt
 	stepWorld(t, 1)
+	var joined world.SeasonJoin
+	apiDo(t, http.MethodPost, "/v1/seasons/current/join", player.token, map[string]any{}, &joined, http.StatusOK)
 	newSeason := getScoreboard(t, player)
 	if newSeason.Season.Number != scoreboard.Season.Number+1 {
 		t.Fatalf("season after expiry = %d, want %d", newSeason.Season.Number, scoreboard.Season.Number+1)

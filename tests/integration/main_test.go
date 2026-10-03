@@ -20,7 +20,7 @@ var (
 	testPool             *pgxpool.Pool
 	testWorld            *world.World
 	testVariablesDir     string
-	testNow              = time.Now().UTC()
+	testNow              = time.Date(2026, time.October, 5, 19, 0, 0, 0, time.UTC)
 )
 
 func TestMain(m *testing.M) {

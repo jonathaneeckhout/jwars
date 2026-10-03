@@ -2,12 +2,14 @@
   "buildings": [
     {
       "kind": "base",
+      "destructible": false,
+      "max_health": 0,
       "width": 3,
       "height": 3,
       "cost": 0,
       "starting": true,
-      "start_x": 10,
-      "start_y": 10,
+      "start_x": 0,
+      "start_y": 0,
       "vision_range": 12,
       "attack_damage": 0,
       "attack_range": 0,
@@ -15,6 +17,8 @@
     },
     {
       "kind": "barracks",
+      "destructible": true,
+      "max_health": 300,
       "width": 3,
       "height": 3,
       "cost": 50,
@@ -26,6 +30,8 @@
     },
     {
       "kind": "watchtower",
+      "destructible": true,
+      "max_health": 150,
       "width": 1,
       "height": 1,
       "cost": 35,

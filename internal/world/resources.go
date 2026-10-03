@@ -2,6 +2,7 @@ package world
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -133,7 +134,9 @@ func (w *World) completeTrainingOrders(ctx context.Context, tx pgx.Tx, tick int6
 		ready = append(ready, item)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil { return err }
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for _, item := range ready {
 		item.order.ProgressPct = 100
 		var building Building
@@ -159,6 +162,60 @@ func (w *World) completeTrainingOrders(ctx context.Context, tx pgx.Tx, tick int6
 		}
 		unit := w.enrichUnit(Unit{ID: unitID, OwnerID: item.playerID, Kind: item.order.UnitKind, X: x, Y: y, Health: w.unitMaxHealth(item.order.UnitKind)}, item.playerID)
 		if err := appendWorldEvent(ctx, tx, Update{PlayerID: item.playerID, Tick: tick, Type: "training.completed", Units: []Unit{unit}, Training: []TrainingOrder{item.order}}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureWorkerRecovery prevents a player with no workers and insufficient
+// materials from becoming permanently unable to play. The base starts one
+// free, deliberately slow worker training order; normal worker training still
+// costs materials and completes much faster.
+func (w *World) ensureWorkerRecovery(ctx context.Context, tx pgx.Tx, tick int64) error {
+	players, err := loadPlayerIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	workerDefinition := w.unitDefinitions["worker"]
+	for _, playerID := range players {
+		var workers int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM units WHERE player_id=$1 AND kind='worker'`, playerID).Scan(&workers); err != nil {
+			return err
+		}
+		if workers > 0 {
+			continue
+		}
+		var alreadyTraining bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM training_orders WHERE player_id=$1 AND unit_kind='worker')`, playerID).Scan(&alreadyTraining); err != nil {
+			return err
+		}
+		if alreadyTraining {
+			continue
+		}
+		var materials int64
+		if err := tx.QueryRow(ctx, `SELECT materials FROM player_resources WHERE player_id=$1`, playerID).Scan(&materials); err != nil {
+			return err
+		}
+		if materials >= workerDefinition.TrainingCost {
+			continue
+		}
+		var baseID string
+		if err := tx.QueryRow(ctx, `SELECT id FROM buildings WHERE player_id=$1 AND kind='base' AND status='complete' ORDER BY id LIMIT 1`, playerID).Scan(&baseID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return err
+		}
+		orderID, err := newID()
+		if err != nil {
+			return err
+		}
+		order := TrainingOrder{ID: orderID, BuildingID: baseID, UnitKind: "worker", StartedTick: tick, CompletionTick: tick + workerDefinition.TrainingTicks*5}
+		if _, err := tx.Exec(ctx, `INSERT INTO training_orders (id,player_id,building_id,unit_kind,started_tick,completion_tick) VALUES ($1,$2,$3,$4,$5,$6)`, order.ID, playerID, order.BuildingID, order.UnitKind, order.StartedTick, order.CompletionTick); err != nil {
+			return err
+		}
+		if err := appendWorldEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "training.started", Training: []TrainingOrder{order}}); err != nil {
 			return err
 		}
 	}

@@ -9,6 +9,23 @@ export JWARS_API_TOKEN=dev-token
 
 Start the game server in another terminal with `./tools/run_jwars.sh` from the repository root.
 
+## Register and join a season
+
+See when the next enrollment window opens, then register a new player. Registration is open for the first 24 hours of a season and returns the player's token once; save it securely.
+
+```sh
+./tools/season.sh
+./tools/register_player.sh
+```
+
+For a returning player, explicitly join the current season with the saved token:
+
+```sh
+JWARS_API_TOKEN='<saved-token>' ./tools/join_season.sh
+```
+
+Seasons start Mondays at 18:00 UTC and accept up to 10 players during the following 24 hours. New players start immediately with a base, worker, soldier, and 100 materials.
+
 ## Reset the local database
 
 ```sh
@@ -76,15 +93,17 @@ Workers gather one material every five ticks while within one tile of the deposi
 
 ## Train units
 
-Build a barracks, wait for construction to finish, then train a soldier or archer:
+Train a worker at the base, or build a barracks and train a soldier or archer:
 
 ```sh
+./tools/state.sh | jq '.buildings[] | select(.kind=="base")'
+./tools/train.sh <base-id> worker
 ./tools/state.sh | jq '.buildings[] | select(.kind=="barracks")'
 ./tools/train.sh <barracks-id> soldier
 ./tools/train.sh <barracks-id> archer
 ```
 
-Snapshots show active training orders. `training.started` and `training.completed` arrive in the event stream.
+Snapshots show active training orders. `training.started`, `training.completed`, and `training.cancelled` arrive in the event stream. If you have no workers and cannot afford one, the base starts a free emergency worker order that takes 300 ticks.
 
 ## Attack an enemy unit
 
@@ -93,9 +112,10 @@ Enemy units must currently be visible in your snapshot. Select a discovered enem
 ```sh
 ./tools/state.sh | jq '.units[] | {id, owner_id, kind, x, y, health}'
 ./tools/attack.sh <enemy-unit-id> <soldier-or-archer-id> [unit-id ...]
+./tools/attack.sh --building <enemy-building-id> <soldier-or-archer-id> [unit-id ...]
 ```
 
-Melee soldiers deal 20 damage per tick at one-tile range; archers deal 10 at four-tile range. Workers cannot attack. Attackers pursue visible targets and move toward a target's last seen position if it leaves vision. Snapshots include your entities and currently visible enemy entities; `entities.hidden` events tell listeners when an enemy leaves vision.
+Melee soldiers deal 20 damage per tick at one-tile range; archers deal 10 at four-tile range. Workers cannot attack. Barracks and watchtowers are destructible; the base is indestructible. Attackers pursue visible targets and move toward a target's last seen position if it leaves vision. Snapshots include your entities and currently visible enemy entities; `entities.hidden` events tell listeners when an enemy leaves vision.
 
 ## Build a structure
 

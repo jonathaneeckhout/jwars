@@ -5,8 +5,24 @@
   "hill_radius": 5,
   "ticks_per_control_point": 60,
   "season_duration_seconds": 604800,
+  "season_start_weekday": "monday",
+  "season_start_time_utc": "18:00",
+  "enrollment_hours": 24,
+  "max_players": 10,
+  "spawn_locations": [
+    { "x": 200, "y": 200 },
+    { "x": 500, "y": 200 },
+    { "x": 800, "y": 200 },
+    { "x": 800, "y": 500 },
+    { "x": 800, "y": 800 },
+    { "x": 500, "y": 800 },
+    { "x": 200, "y": 800 },
+    { "x": 200, "y": 500 },
+    { "x": 350, "y": 200 },
+    { "x": 650, "y": 200 }
+  ],
   "starting_units": [
-    { "kind": "worker", "x": 13, "y": 12 },
-    { "kind": "soldier", "x": 14, "y": 12 }
+    { "kind": "worker", "x": 3, "y": 2 },
+    { "kind": "soldier", "x": 4, "y": 2 }
   ]
 }

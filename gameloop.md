@@ -12,15 +12,17 @@ Jwars is a week-long, free-for-all RTS competition for 5–10 players. Players w
 - At the next season, the map and score reset for a new competition.
 - The MVP is free-for-all. Other players are the only opponents; there are no neutral threats or scheduled PvE events.
 
-The season starts when the world is first initialized. At the end of a season, the server records the final standings and winners, resets the map and score, and starts the next seven-day season while retaining player accounts and API tokens.
+Seasons start every Monday at 18:00 UTC and last seven real-time days. The schedule is configurable in `variables/world.json`. New players can register and join during the first 24 hours; returning players keep their player ID and API token and explicitly rejoin each season. Late joiners start immediately and use the same scoring rules as everyone else. The server accepts up to 10 players and starts on schedule even if fewer than five have joined.
+
+Every player starts with a base, one worker, one melee soldier, and 100 materials. The server randomly assigns balanced spawn locations, each equally distant from the hill and with a nearby material deposit. Returning players avoid their previous spawn when another site is available. Workers can be trained at the base. If a player has no workers and lacks the materials to train one, the base slowly produces a free emergency worker so the player cannot be permanently locked out of the economy. At season end, the server records the final standings and winners, resets the world and score, and opens a fresh enrollment window at the next scheduled start.
 
 ## Core loop
 
 Players and their clients repeat this loop throughout the season:
 
 1. **Observe:** Read the player-visible snapshot and ordered world events. Enemy entities are visible only while within the player's vision.
-2. **Develop:** Direct workers to gather materials from renewable deposits, build a barracks or watchtower, and train melee soldiers or archers. Economy and military strength help a player compete, but do not directly add to the score.
-3. **Scout and maneuver:** Use unit movement and limited vision to locate opponents, choose routes, and position forces.
+2. **Develop:** Direct workers to gather materials from renewable deposits, build a barracks or watchtower, and train workers, melee soldiers, or archers. Economy and military strength help a player compete, but do not directly add to the score.
+3. **Scout and maneuver:** Use unit movement and limited vision to locate opponents, choose routes, and position forces. Soldiers and archers can attack visible enemy buildings as well as units.
 4. **Fight for the hill:** Give melee soldiers attack and movement orders to take or defend the single fixed hill at (500, 500). Its control area is a five-tile Chebyshev radius (a square). Workers and archers do not control the hill. Archers attack at range; watchtowers provide vision and automatic short-range defense.
 5. **Earn control points:** A player earns one point per 60 world ticks (currently one second per tick) while their melee soldiers control the hill uncontested. Rival melee soldiers in the control area make it contested, so nobody scores while it is contested.
 6. **Adapt:** React to events, changes in visibility, attacks, and opponents' attempts to take control. A client should make frequent tactical decisions; the player should not need to issue every order manually.
@@ -38,12 +40,17 @@ Control points are banked permanently. Losing the hill stops future scoring but 
 
 The scoreboard tracks each player's banked control points during the season. At season end, the highest score wins; tied highest scores share the win. Resources and unit counts are not alternate score categories or tie-breakers in the MVP.
 
+## Current combat and recovery rules
+
+- Barracks and watchtowers have configurable health and can be attacked and destroyed. A destroyed building is removed; its queued training is canceled and the invested materials are not refunded.
+- The base is indestructible. It remains a recovery anchor, so players cannot be eliminated by losing one battle.
+- Workers can be trained at the base for materials. If the player has no workers and cannot afford another, the base queues a free emergency worker that takes five times as long as normal worker training.
+- Other destroyed units are not automatically replaced. Players can train new soldiers and archers if they still have a barracks and enough materials.
+
 ## Deferred design decisions
 
 These are intentionally left for a later pass and must not be silently assumed while implementing the core loop:
 
-- How players enter a season and where their bases start.
-- What happens when units die and how a player recovers from losses.
 - Whether future scoring updates should be emitted more frequently than point milestones.
 
 ## MVP acceptance behavior
@@ -52,9 +59,12 @@ These are intentionally left for a later pass and must not be silently assumed w
 - Only melee soldiers can establish and maintain hill control.
 - The economy has one material resource gathered by workers from visible deposits; deposits deplete and slowly regenerate.
 - The unit roster is workers, melee soldiers, and archers. Barracks train soldiers and archers; watchtowers attack nearby enemies and extend vision.
+- The base trains workers, and slowly replaces a player's last worker for free if they cannot afford a normal worker order. Barracks and watchtowers are destructible; the base is not.
 - A player scores while they are the only player's melee soldiers in the hill's control area; presence by rival melee soldiers contests it and pauses scoring.
 - Points remain banked after control changes hands.
 - The scoreboard identifies the highest score and supports shared wins on a tie.
 - The world can continue the loop while a player's autonomous client operates without manual per-order input.
 - `GET /v1/scoreboard` and the authenticated world snapshot expose the active season, hill state, and standings/own score.
+- Public player registration returns a one-time API token; returning players explicitly join each season through the API during the enrollment window.
+- Seasons start Monday at 18:00 UTC, admit up to 10 players for 24 hours, and assign balanced spawn locations with the same starting loadout.
 - Hill ownership changes and each newly earned point are delivered as ordered events; no per-tick score event is emitted.

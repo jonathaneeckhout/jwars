@@ -5,8 +5,14 @@ TOOLS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$TOOLS_DIR/lib.sh"
 jwars_load_config
 
+target_field='target_unit_id'
+if [[ "${1:-}" == '--building' ]]; then
+	target_field='target_building_id'
+	shift
+fi
+
 if (($# < 2)); then
-	printf 'Usage: %s <target-unit-id> <attacking-unit-id> [attacking-unit-id ...]\n' "$0" >&2
+	printf 'Usage: %s [--building] <target-id> <attacking-unit-id> [attacking-unit-id ...]\n' "$0" >&2
 	exit 2
 fi
 
@@ -16,9 +22,10 @@ unit_ids_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"
 command_id="bash-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
 payload="$(jq -cn \
 	--arg id "$command_id" \
-	--arg target_unit_id "$target_id" \
+	--arg target_field "$target_field" \
+	--arg target_id "$target_id" \
 	--argjson unit_ids "$unit_ids_json" \
-	'{id:$id,type:"attack",unit_ids:$unit_ids,target_unit_id:$target_unit_id}')"
+	'{id:$id,type:"attack",unit_ids:$unit_ids} + {($target_field):$target_id}')"
 
 response_file="$(mktemp)"
 trap 'rm -f "$response_file"' EXIT
