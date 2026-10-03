@@ -1,0 +1,33 @@
+{
+  "units": [
+    {
+      "kind": "worker",
+      "max_health": 100,
+      "vision_range": 8,
+      "attack_damage": 0,
+      "attack_range": 0,
+      "training_cost": 0,
+      "training_ticks": 0
+    },
+    {
+      "kind": "soldier",
+      "max_health": 100,
+      "vision_range": 8,
+      "attack_damage": 20,
+      "attack_range": 1,
+      "training_cost": 25,
+      "training_ticks": 15,
+      "training_building": "barracks"
+    },
+    {
+      "kind": "archer",
+      "max_health": 60,
+      "vision_range": 10,
+      "attack_damage": 10,
+      "attack_range": 4,
+      "training_cost": 40,
+      "training_ticks": 25,
+      "training_building": "barracks"
+    }
+  ]
+}

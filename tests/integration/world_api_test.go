@@ -2,11 +2,25 @@ package integration_test
 
 import (
 	"net/http"
+	"reflect"
 	"testing"
+
+	"github.com/jojo/jwars/internal/world"
 )
 
 func TestWorldSnapshot_RequiresAuthentication(t *testing.T) {
 	apiDo(t, http.MethodGet, "/v1/world", "", nil, nil, http.StatusUnauthorized)
+}
+
+func TestUnitDefinitions_ExposeConfiguredStatsAndTrainingCosts(t *testing.T) {
+	player := newTestPlayer(t)
+	var response struct {
+		Units []world.UnitDefinition `json:"units"`
+	}
+	apiDo(t, http.MethodGet, "/v1/definitions/units", player.token, nil, &response, http.StatusOK)
+	if !reflect.DeepEqual(response.Units, testWorld.UnitDefinitions()) {
+		t.Fatalf("API unit definitions = %+v, want loaded configuration %+v", response.Units, testWorld.UnitDefinitions())
+	}
 }
 
 func TestWorldSnapshot_ListsRandomEntityIDs(t *testing.T) {

@@ -1,0 +1,12 @@
+{
+  "map_size": 1000,
+  "tick_interval_millis": 1000,
+  "hill": { "x": 500, "y": 500 },
+  "hill_radius": 5,
+  "ticks_per_control_point": 60,
+  "season_duration_seconds": 604800,
+  "starting_units": [
+    { "kind": "worker", "x": 13, "y": 12 },
+    { "kind": "soldier", "x": 14, "y": 12 }
+  ]
+}

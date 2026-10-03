@@ -19,7 +19,7 @@ var (
 	testServer           *httptest.Server
 	testPool             *pgxpool.Pool
 	testWorld            *world.World
-	testBuildingDefsPath string
+	testVariablesDir     string
 	testNow              = time.Now().UTC()
 )
 
@@ -65,8 +65,8 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 
-	testBuildingDefsPath = filepath.Join("testdata", "buildings.json")
-	testWorld, err = world.NewWithOptions(testPool, testBuildingDefsPath, world.Options{
+	testVariablesDir = filepath.Join("testdata", "variables")
+	testWorld, err = world.NewWithOptions(testPool, testVariablesDir, world.Options{
 		Hill:          world.Point{X: 20, Y: 20},
 		HillRadius:    1,
 		Now:           func() time.Time { return testNow },

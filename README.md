@@ -28,19 +28,24 @@ That removes all local player and world data in the Compose database volume and 
 | `JWARS_ADDR` | `127.0.0.1:8080` | HTTP listen address |
 | `JWARS_API_TOKEN` | `dev-token` | Development bearer token, stored as a SHA-256 hash |
 | `JWARS_PLAYER_ID` | `player-1` | Player associated with the development token |
-| `JWARS_BUILDING_DEFS` | `definitions/buildings.json` | Data-driven building definitions |
+| `JWARS_VARIABLES_DIR` | `variables/` | JSON game settings and entity definitions |
 
 ## API
 
 All game endpoints require `Authorization: Bearer <token>`. The token resolves to a player; state, commands, and event cursors are player-scoped.
 
-Get the current player-visible snapshot and available building definitions:
+Get the current player-visible snapshot and available unit/building definitions:
 
 ```sh
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/world
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/scoreboard
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/buildings
+curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/units
 ```
+
+Gameplay settings load once at startup from `variables/`: `buildings.json`, `units.json`, `economy.json`, and `world.json`. They include entity stats and costs, starting units/resources, deposit locations and rates, map size, tick interval, hill scoring, and season length. Invalid or missing settings stop startup. Set `JWARS_VARIABLES_DIR` to select another directory; restart the server to apply edits. The building definitions remain available at `/v1/definitions/buildings`; unit stats and training costs are at `/v1/definitions/units`.
+
+The current world and resource deposits are persisted in PostgreSQL. Run `./tools/clean_db.sh` once before using this configuration update because the schema changed and migrations are not implemented. Also reset the database after changing map size, starting placements, or deposit locations so persisted state matches those settings.
 
 Entity IDs are opaque random 128-bit hex strings, so clients should read them from the snapshot or events rather than constructing them. Issue a move order with a discovered unit ID. Commands use stable unit IDs and a client-generated command ID; repeating the same command ID for that player returns the original result.
 
@@ -70,7 +75,7 @@ curl -N -H 'Authorization: Bearer dev-token' \
 
 Building objects in snapshots include `build_ticks`, `progress_ticks`, and `progress_percent`. The event stream emits `buildings.progress` when a construction crosses 25%, 50%, or 75%; `buildings.completed` reports 100%. Progress still advances each world tick, so a snapshot contains the latest exact value between milestone events.
 
-Snapshots always include your own units and buildings, plus enemy units and buildings currently within your vision. Resource deposits are listed only while visible. Workers and melee soldiers have 8 tiles of vision, archers have 10, the `base` has 12, and watchtowers have 12. Other completed buildings have 6. Distance uses Chebyshev distance, so diagonal movement counts as one tile. Buildings under construction do not provide vision. `units.spotted`, `buildings.spotted`, and `resource_deposits.spotted` reveal newly visible entities; `entities.hidden` contains only entity IDs and types when they leave vision.
+Snapshots always include your own units and buildings, plus enemy units and buildings currently within your vision. Resource deposits are listed only while visible. Workers and melee soldiers have 8 tiles of vision, archers have 10, the `base` has 12, and watchtowers have 12. Other completed buildings have 6. These values are configured in `variables/`. Distance uses Chebyshev distance, so diagonal movement counts as one tile. Buildings under construction do not provide vision. `units.spotted`, `buildings.spotted`, and `resource_deposits.spotted` reveal newly visible entities; `entities.hidden` contains only entity IDs and types when they leave vision.
 
 Issue an explicit attack order against a currently visible enemy unit:
 
@@ -83,14 +88,14 @@ curl -X POST http://127.0.0.1:8080/v1/commands \
 
 Workers cannot attack. Melee soldiers have 100 health and deal 20 damage per tick at one-tile range. Archers have 60 health and deal 10 damage per tick at four-tile range. Attackers pursue visible targets; when a target leaves vision, they move toward its last seen position and wait there until they see it again. Completed watchtowers deal 10 damage every five ticks to enemies within four tiles. Damage is applied simultaneously each tick. `units.damaged` and `units.destroyed` events report combat results. Units do not retaliate or heal automatically, and destroyed units do not respawn.
 
-Workers gather one material every five ticks from visible deposits. Deposits contain 500 materials and regenerate one material per minute up to capacity. Issue a `gather` command with a visible `deposit_id`; workers walk within one tile and continue until given another order. A completed barracks trains one soldier (25 materials, 15 ticks) or archer (40 materials, 25 ticks) at a time. Issue a `train` command with the `building_id` and `unit_kind`. `training.started` and `training.completed` events report training, and snapshots include queue progress.
+Workers gather one material every five ticks from visible deposits. Deposits contain 500 materials and regenerate one material per minute up to capacity. Issue a `gather` command with a visible `deposit_id`; workers walk within one tile and continue until given another order. A completed barracks trains one soldier (25 materials, 15 ticks) or archer (40 materials, 25 ticks) at a time. Issue a `train` command with the `building_id` and `unit_kind`. `training.started` and `training.completed` events report training, and snapshots include queue progress. Economy values and unit costs/timing are configured in `variables/economy.json` and `variables/units.json`.
 
-The current loop runs seven-day seasons around a fixed hill at (500, 500). Melee soldiers within its five-tile square control area score one point per minute when no rival melee soldiers are present; workers and archers do not count and contested control awards no points. `/v1/scoreboard` reports the season, hill, standings, and previous result. Snapshots include the season, hill state, and the authenticated player's score. `hill.changed` and point-milestone `score.changed` events are ordered with the player's other events. When a season expires, the server records the result, resets the world tick, units, buildings, resources, deposits, and score, then begins the next season while retaining player identities and API tokens. See [`gameloop.md`](gameloop.md) for the current loop definition.
+The current loop runs seven-day seasons around a hill at (500, 500). Melee soldiers within its five-tile square control area score one point per minute when no rival melee soldiers are present; workers and archers do not count and contested control awards no points. `/v1/scoreboard` reports the season, hill, standings, and previous result. Snapshots include the season, hill state, and the authenticated player's score. `hill.changed` and point-milestone `score.changed` events are ordered with the player's other events. When a season expires, the server records the result, resets the world tick, units, buildings, resources, deposits, and score, then begins the next season while retaining player identities and API tokens. Hill, season, map, and tick settings are in `variables/world.json`. See [`gameloop.md`](gameloop.md) for the current loop definition.
 
-Convenience Bash scripts for snapshots, scores and standings, listening, move and attack orders, and builds are in [`tools/`](tools/README.md).
+Convenience Bash scripts for snapshots, scores and standings, listening, move and attack orders, gathering, training, and builds are in [`tools/`](tools/README.md).
 
 ## Current scope
 
-The server stores players, token hashes, units, buildings, resources, deposits, training orders, command results, per-player event sequences, and a bounded event history in PostgreSQL. Tick and command writes are serialized by one Go process and persisted with their corresponding events in one transaction. Building footprints, costs, and construction times use data-driven definitions. World time pauses during server downtime and resumes from the last committed tick.
+The server stores players, token hashes, units, buildings, resources, deposits, training orders, command results, per-player event sequences, and a bounded event history in PostgreSQL. Tick and command writes are serialized by one Go process and persisted with their corresponding events in one transaction. Gameplay settings and entity stats load from JSON files under `variables/`. World time pauses during server downtime and resumes from the last committed tick.
 
 There is no player registration flow, building damage, terrain-based line of sight, remembered fog-of-war state, resource balancing, multi-process coordination, or automatic schema migration yet. The environment-seeded player/token is for local development; change it before using the server beyond localhost.

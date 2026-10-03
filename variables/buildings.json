@@ -1,0 +1,39 @@
+{
+  "buildings": [
+    {
+      "kind": "base",
+      "width": 3,
+      "height": 3,
+      "cost": 0,
+      "starting": true,
+      "start_x": 10,
+      "start_y": 10,
+      "vision_range": 12,
+      "attack_damage": 0,
+      "attack_range": 0,
+      "attack_interval_ticks": 0
+    },
+    {
+      "kind": "barracks",
+      "width": 3,
+      "height": 3,
+      "cost": 50,
+      "build_ticks": 60,
+      "vision_range": 6,
+      "attack_damage": 0,
+      "attack_range": 0,
+      "attack_interval_ticks": 0
+    },
+    {
+      "kind": "watchtower",
+      "width": 1,
+      "height": 1,
+      "cost": 35,
+      "build_ticks": 30,
+      "vision_range": 12,
+      "attack_damage": 10,
+      "attack_range": 4,
+      "attack_interval_ticks": 5
+    }
+  ]
+}

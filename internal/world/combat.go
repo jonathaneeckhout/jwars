@@ -27,7 +27,7 @@ func loadPlayerIDs(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return players, rows.Err()
 }
 
-func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits []Unit, buildings []Building, deposits []ResourceDeposit) (combatTickResult, error) {
+func (w *World) advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits []Unit, buildings []Building, deposits []ResourceDeposit) (combatTickResult, error) {
 	result := combatTickResult{destroyed: make([]Unit, 0)}
 	oldByID := make(map[string]Unit, len(beforeUnits))
 	currentByID := make(map[string]Unit, len(beforeUnits))
@@ -42,7 +42,7 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits [
 	}
 	for _, unit := range beforeUnits {
 		if _, exists := oldVisible[unit.OwnerID]; !exists {
-			oldVisible[unit.OwnerID] = visibleEntities(unit.OwnerID, beforeUnits, buildings)
+			oldVisible[unit.OwnerID] = w.visibleEntities(unit.OwnerID, beforeUnits, buildings)
 		}
 	}
 
@@ -52,7 +52,7 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits [
 		unit := currentByID[old.ID]
 		if unit.AttackTargetID != nil {
 			target, exists := oldByID[*unit.AttackTargetID]
-			if !exists || unitAttackDamage(unit.Kind) == 0 {
+			if !exists || w.unitAttackDamage(unit.Kind) == 0 {
 				unit.AttackTargetID, unit.AttackTargetX, unit.AttackTargetY = nil, nil, nil
 			} else {
 				if oldVisible[unit.OwnerID][entityKey("unit:"+target.ID)] {
@@ -62,7 +62,7 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits [
 				if unit.AttackTargetX != nil && unit.AttackTargetY != nil {
 					targetX, targetY := *unit.AttackTargetX, *unit.AttackTargetY
 					visible := oldVisible[unit.OwnerID][entityKey("unit:"+target.ID)]
-					if !visible || chebyshev(unit.X, unit.Y, targetX, targetY) > unitAttackRange(unit.Kind) {
+					if !visible || chebyshev(unit.X, unit.Y, targetX, targetY) > w.unitAttackRange(unit.Kind) {
 						unit.X, unit.Y = stepToward(unit.X, unit.Y, targetX, targetY)
 					}
 				}
@@ -72,7 +72,7 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits [
 			if !exists {
 				unit.GatherTargetID = nil
 				unit.GatherProgress = 0
-			} else if chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) > 1 {
+			} else if chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) > w.config.Economy.GatherRange {
 				unit.X, unit.Y = stepToward(unit.X, unit.Y, deposit.X, deposit.Y)
 			}
 		} else if unit.TargetX != nil && unit.TargetY != nil {
@@ -88,29 +88,27 @@ func advanceCombatTick(ctx context.Context, tx pgx.Tx, tick int64, beforeUnits [
 	visibleAfterMove := make(map[string]map[entityKey]bool)
 	for _, unit := range postMove {
 		if _, exists := visibleAfterMove[unit.OwnerID]; !exists {
-			visibleAfterMove[unit.OwnerID] = visibleEntities(unit.OwnerID, postMove, buildings)
+			visibleAfterMove[unit.OwnerID] = w.visibleEntities(unit.OwnerID, postMove, buildings)
 		}
 	}
 	damage := make(map[string]int)
-	if tick%5 == 0 {
-		for _, building := range buildings {
-			if building.Kind != "watchtower" || building.Status != "complete" {
-				continue
-			}
+	for _, building := range buildings {
+		definition := w.buildingDefinition(building.Kind)
+		if building.Status == "complete" && definition.AttackDamage > 0 && tick%definition.AttackIntervalTicks == 0 {
 			for _, unit := range postMove {
-				if unit.OwnerID != building.OwnerID && chebyshevToBuilding(unit.X, unit.Y, building) <= 4 {
-					damage[unit.ID] += 10
+				if unit.OwnerID != building.OwnerID && chebyshevToBuilding(unit.X, unit.Y, building) <= definition.AttackRange {
+					damage[unit.ID] += definition.AttackDamage
 				}
 			}
 		}
 	}
 	for _, unit := range postMove {
-		if unit.AttackTargetID == nil || unitAttackDamage(unit.Kind) == 0 {
+		if unit.AttackTargetID == nil || w.unitAttackDamage(unit.Kind) == 0 {
 			continue
 		}
 		target, exists := currentByID[*unit.AttackTargetID]
-		if exists && visibleAfterMove[unit.OwnerID][entityKey("unit:"+target.ID)] && chebyshev(unit.X, unit.Y, target.X, target.Y) <= unitAttackRange(unit.Kind) {
-			damage[target.ID] += unitAttackDamage(unit.Kind)
+		if exists && visibleAfterMove[unit.OwnerID][entityKey("unit:"+target.ID)] && chebyshev(unit.X, unit.Y, target.X, target.Y) <= w.unitAttackRange(unit.Kind) {
+			damage[target.ID] += w.unitAttackDamage(unit.Kind)
 		}
 	}
 
@@ -164,7 +162,7 @@ func valuesOfUnits(units map[string]Unit) []Unit {
 	return result
 }
 
-func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []string, beforeUnits []Unit, beforeBuildings []Building, afterUnits []Unit, afterBuildings []Building, beforeDeposits []ResourceDeposit, afterDeposits []ResourceDeposit, destroyed []Unit) error {
+func (w *World) emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []string, beforeUnits []Unit, beforeBuildings []Building, afterUnits []Unit, afterBuildings []Building, beforeDeposits []ResourceDeposit, afterDeposits []ResourceDeposit, destroyed []Unit) error {
 	oldUnits := make(map[string]Unit, len(beforeUnits))
 	newUnits := make(map[string]Unit, len(afterUnits))
 	oldBuildings := make(map[string]Building, len(beforeBuildings))
@@ -191,13 +189,13 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 	}
 
 	for _, playerID := range players {
-		wasVisible := visibleEntities(playerID, beforeUnits, beforeBuildings)
-		isVisible := visibleEntities(playerID, afterUnits, afterBuildings)
+		wasVisible := w.visibleEntities(playerID, beforeUnits, beforeBuildings)
+		isVisible := w.visibleEntities(playerID, afterUnits, afterBuildings)
 		spottedDeposits := make([]ResourceDeposit, 0)
 		changedDeposits := make([]ResourceDeposit, 0)
 		for id, deposit := range newDeposits {
-			wasSeen := depositVisible(playerID, oldDeposits[id], beforeUnits, beforeBuildings)
-			isSeen := depositVisible(playerID, deposit, afterUnits, afterBuildings)
+			wasSeen := w.depositVisible(playerID, oldDeposits[id], beforeUnits, beforeBuildings)
+			isSeen := w.depositVisible(playerID, deposit, afterUnits, afterBuildings)
 			if !isSeen {
 				continue
 			}
@@ -223,15 +221,15 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 			old, existed := oldUnits[id]
 			if !existed || !wasVisible[key] {
 				if unit.OwnerID != playerID {
-					spottedUnits = append(spottedUnits, enrichUnit(unit, playerID))
+				spottedUnits = append(spottedUnits, w.enrichUnit(unit, playerID))
 				}
 				continue
 			}
 			if unit.Health != old.Health {
-				damagedUnits = append(damagedUnits, enrichUnit(unit, playerID))
+				damagedUnits = append(damagedUnits, w.enrichUnit(unit, playerID))
 			}
 			if unit.X != old.X || unit.Y != old.Y || !sameIntPointer(unit.TargetX, old.TargetX) || !sameIntPointer(unit.TargetY, old.TargetY) || !sameStringPointer(unit.AttackTargetID, old.AttackTargetID) {
-				changedUnits = append(changedUnits, enrichUnit(unit, playerID))
+				changedUnits = append(changedUnits, w.enrichUnit(unit, playerID))
 			}
 		}
 		for id, building := range newBuildings {
@@ -242,12 +240,12 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 			old, existed := oldBuildings[id]
 			if !existed || !wasVisible[key] {
 				if building.OwnerID != playerID {
-					spottedBuildings = append(spottedBuildings, enrichBuilding(building))
+				spottedBuildings = append(spottedBuildings, w.enrichBuilding(building))
 				}
 				continue
 			}
 			if building.OwnerID != playerID && (building.Status != old.Status || constructionMilestone(old, tick-1) != constructionMilestone(building, tick)) {
-				changedBuildings = append(changedBuildings, enrichBuilding(building))
+				changedBuildings = append(changedBuildings, w.enrichBuilding(building))
 			}
 		}
 		for key := range wasVisible {
@@ -263,13 +261,13 @@ func emitWorldEvents(ctx context.Context, tx pgx.Tx, tick int64, players []strin
 			}
 		}
 		for id, deposit := range oldDeposits {
-			if depositVisible(playerID, deposit, beforeUnits, beforeBuildings) && !depositVisible(playerID, newDeposits[id], afterUnits, afterBuildings) {
+			if w.depositVisible(playerID, deposit, beforeUnits, beforeBuildings) && !w.depositVisible(playerID, newDeposits[id], afterUnits, afterBuildings) {
 				hidden = append(hidden, EntityRef{ID: id, Type: "resource_deposit"})
 			}
 		}
 		for id, unit := range dead {
 			if unit.OwnerID == playerID || wasVisible[entityKey("unit:"+id)] {
-				destroyedUnits = append(destroyedUnits, enrichUnit(unit, playerID))
+			destroyedUnits = append(destroyedUnits, w.enrichUnit(unit, playerID))
 			}
 		}
 		if len(destroyedUnits) > 0 {

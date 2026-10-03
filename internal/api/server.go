@@ -27,6 +27,7 @@ func New(w *world.World) http.Handler {
 	mux.Handle("GET /v1/world", s.auth(http.HandlerFunc(s.getWorld)))
 	mux.Handle("GET /v1/scoreboard", s.auth(http.HandlerFunc(s.scoreboard)))
 	mux.Handle("GET /v1/definitions/buildings", s.auth(http.HandlerFunc(s.getBuildingDefinitions)))
+	mux.Handle("GET /v1/definitions/units", s.auth(http.HandlerFunc(s.getUnitDefinitions)))
 	mux.Handle("GET /v1/events", s.auth(http.HandlerFunc(s.events)))
 	mux.Handle("POST /v1/commands", s.auth(http.HandlerFunc(s.commands)))
 	return mux
@@ -83,6 +84,10 @@ func (s *Server) scoreboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getBuildingDefinitions(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"buildings": s.world.BuildingDefinitions()})
+}
+
+func (s *Server) getUnitDefinitions(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"units": s.world.UnitDefinitions()})
 }
 
 func (s *Server) commands(w http.ResponseWriter, r *http.Request) {

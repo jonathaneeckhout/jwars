@@ -2,60 +2,40 @@ package world
 
 type entityKey string
 
-func unitVisionRange(kind string) int {
-	switch kind {
-	case "worker", "soldier":
-		return 8
-	case "archer":
-		return 10
-	default:
-		return 0
-	}
+func (w *World) unitDefinition(kind string) UnitDefinition {
+	return w.unitDefinitions[kind]
 }
 
-func unitMaxHealth(kind string) int {
-	if kind == "archer" {
-		return 60
-	}
-	return 100
+func (w *World) unitVisionRange(kind string) int {
+	return w.unitDefinition(kind).VisionRange
 }
 
-func unitAttackDamage(kind string) int {
-	if kind == "soldier" {
-		return 20
-	}
-	if kind == "archer" {
-		return 10
-	}
-	return 0
+func (w *World) unitMaxHealth(kind string) int {
+	return w.unitDefinition(kind).MaxHealth
 }
 
-func unitAttackRange(kind string) int {
-	if kind == "soldier" {
-		return 1
-	}
-	if kind == "archer" {
-		return 4
-	}
-	return 0
+func (w *World) unitAttackDamage(kind string) int {
+	return w.unitDefinition(kind).AttackDamage
 }
 
-func buildingVisionRange(building Building) int {
+func (w *World) unitAttackRange(kind string) int {
+	return w.unitDefinition(kind).AttackRange
+}
+
+func (w *World) buildingDefinition(kind string) BuildingDefinition {
+	return w.definitions[kind]
+}
+
+func (w *World) buildingVisionRange(building Building) int {
 	if building.Status != "complete" {
 		return 0
 	}
-	if building.Kind == "base" || building.Kind == "base_core" {
-		return 12
-	}
-	if building.Kind == "watchtower" {
-		return 12
-	}
-	return 6
+	return w.buildingDefinition(building.Kind).VisionRange
 }
 
-func enrichUnit(unit Unit, viewerID string) Unit {
-	unit.MaxHealth = unitMaxHealth(unit.Kind)
-	unit.VisionRange = unitVisionRange(unit.Kind)
+func (w *World) enrichUnit(unit Unit, viewerID string) Unit {
+	unit.MaxHealth = w.unitMaxHealth(unit.Kind)
+	unit.VisionRange = w.unitVisionRange(unit.Kind)
 	if unit.OwnerID != viewerID {
 		unit.TargetX, unit.TargetY, unit.AttackTargetID, unit.GatherTargetID = nil, nil, nil, nil
 		unit.GatherProgress = 0
@@ -63,12 +43,12 @@ func enrichUnit(unit Unit, viewerID string) Unit {
 	return unit
 }
 
-func enrichBuilding(building Building) Building {
-	building.VisionRange = buildingVisionRange(building)
+func (w *World) enrichBuilding(building Building) Building {
+	building.VisionRange = w.buildingVisionRange(building)
 	return building
 }
 
-func visibleEntities(playerID string, units []Unit, buildings []Building) map[entityKey]bool {
+func (w *World) visibleEntities(playerID string, units []Unit, buildings []Building) map[entityKey]bool {
 	visible := make(map[entityKey]bool, len(units)+len(buildings))
 	for _, unit := range units {
 		if unit.OwnerID == playerID {
@@ -87,7 +67,7 @@ func visibleEntities(playerID string, units []Unit, buildings []Building) map[en
 			continue
 		}
 		for _, observer := range units {
-			if observer.OwnerID == playerID && chebyshev(observer.X, observer.Y, enemy.X, enemy.Y) <= unitVisionRange(observer.Kind) {
+			if observer.OwnerID == playerID && chebyshev(observer.X, observer.Y, enemy.X, enemy.Y) <= w.unitVisionRange(observer.Kind) {
 				visible[key] = true
 				break
 			}
@@ -96,7 +76,7 @@ func visibleEntities(playerID string, units []Unit, buildings []Building) map[en
 			continue
 		}
 		for _, observer := range buildings {
-			if observer.OwnerID == playerID && buildingVisionRange(observer) > 0 && chebyshevToBuilding(enemy.X, enemy.Y, observer) <= buildingVisionRange(observer) {
+			if observer.OwnerID == playerID && w.buildingVisionRange(observer) > 0 && chebyshevToBuilding(enemy.X, enemy.Y, observer) <= w.buildingVisionRange(observer) {
 				visible[key] = true
 				break
 			}
@@ -108,7 +88,7 @@ func visibleEntities(playerID string, units []Unit, buildings []Building) map[en
 			continue
 		}
 		for _, observer := range units {
-			if observer.OwnerID == playerID && chebyshevToBuilding(observer.X, observer.Y, enemy) <= unitVisionRange(observer.Kind) {
+			if observer.OwnerID == playerID && chebyshevToBuilding(observer.X, observer.Y, enemy) <= w.unitVisionRange(observer.Kind) {
 				visible[key] = true
 				break
 			}
@@ -117,7 +97,7 @@ func visibleEntities(playerID string, units []Unit, buildings []Building) map[en
 			continue
 		}
 		for _, observer := range buildings {
-			if observer.OwnerID == playerID && buildingVisionRange(observer) > 0 && buildingDistance(observer, enemy) <= buildingVisionRange(observer) {
+			if observer.OwnerID == playerID && w.buildingVisionRange(observer) > 0 && buildingDistance(observer, enemy) <= w.buildingVisionRange(observer) {
 				visible[key] = true
 				break
 			}

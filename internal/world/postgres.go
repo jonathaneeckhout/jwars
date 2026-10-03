@@ -24,8 +24,8 @@ var schemaStatements = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS hill_state (
 		singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
-		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
+		x INTEGER NOT NULL CHECK (x >= 0),
+		y INTEGER NOT NULL CHECK (y >= 0),
 		control_radius INTEGER NOT NULL CHECK (control_radius >= 0),
 		owner_player_id TEXT,
 		contested BOOLEAN NOT NULL DEFAULT FALSE
@@ -52,13 +52,13 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS api_tokens_player_id_idx ON api_tokens(player_id)`,
 	`CREATE TABLE IF NOT EXISTS player_resources (
 		player_id TEXT PRIMARY KEY REFERENCES players(player_id),
-		materials BIGINT NOT NULL DEFAULT 100 CHECK (materials >= 0)
+		materials BIGINT NOT NULL DEFAULT 0 CHECK (materials >= 0)
 	)`,
 	`CREATE TABLE IF NOT EXISTS resource_deposits (
 		id TEXT PRIMARY KEY,
 		kind TEXT NOT NULL CHECK (kind = 'materials'),
-		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
-		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
+		x INTEGER NOT NULL CHECK (x >= 0),
+		y INTEGER NOT NULL CHECK (y >= 0),
 		amount INTEGER NOT NULL CHECK (amount >= 0),
 		capacity INTEGER NOT NULL CHECK (capacity > 0 AND amount <= capacity),
 		UNIQUE (x, y)
@@ -67,16 +67,16 @@ var schemaStatements = []string{
 		id TEXT PRIMARY KEY,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
 		kind TEXT NOT NULL,
-		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
-		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
-		health INTEGER NOT NULL DEFAULT 100 CHECK (health > 0),
-		target_x INTEGER CHECK (target_x >= 0 AND target_x < 1000),
-		target_y INTEGER CHECK (target_y >= 0 AND target_y < 1000),
+		x INTEGER NOT NULL CHECK (x >= 0),
+		y INTEGER NOT NULL CHECK (y >= 0),
+		health INTEGER NOT NULL CHECK (health > 0),
+		target_x INTEGER CHECK (target_x >= 0),
+		target_y INTEGER CHECK (target_y >= 0),
 		target_unit_id TEXT REFERENCES units(id) ON DELETE SET NULL,
 		gather_target_id TEXT REFERENCES resource_deposits(id) ON DELETE SET NULL,
-		gather_progress SMALLINT NOT NULL DEFAULT 0 CHECK (gather_progress >= 0 AND gather_progress < 5),
-		attack_target_x INTEGER CHECK (attack_target_x >= 0 AND attack_target_x < 1000),
-		attack_target_y INTEGER CHECK (attack_target_y >= 0 AND attack_target_y < 1000),
+		gather_progress INTEGER NOT NULL DEFAULT 0 CHECK (gather_progress >= 0),
+		attack_target_x INTEGER CHECK (attack_target_x >= 0),
+		attack_target_y INTEGER CHECK (attack_target_y >= 0),
 		CHECK ((target_x IS NULL) = (target_y IS NULL)),
 		CHECK ((attack_target_x IS NULL) = (attack_target_y IS NULL)),
 		CHECK (target_unit_id IS NULL OR (attack_target_x IS NOT NULL AND attack_target_y IS NOT NULL)),
@@ -88,8 +88,8 @@ var schemaStatements = []string{
 		id TEXT PRIMARY KEY,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
 		kind TEXT NOT NULL,
-		x INTEGER NOT NULL CHECK (x >= 0 AND x < 1000),
-		y INTEGER NOT NULL CHECK (y >= 0 AND y < 1000),
+		x INTEGER NOT NULL CHECK (x >= 0),
+		y INTEGER NOT NULL CHECK (y >= 0),
 		width INTEGER NOT NULL CHECK (width > 0),
 		height INTEGER NOT NULL CHECK (height > 0),
 		status TEXT NOT NULL CHECK (status IN ('constructing', 'complete')),
@@ -97,7 +97,7 @@ var schemaStatements = []string{
 		build_ticks BIGINT NOT NULL DEFAULT 0 CHECK (build_ticks >= 0),
 		completion_tick BIGINT,
 		CHECK ((status = 'constructing' AND completion_tick IS NOT NULL AND completion_tick = started_tick + build_ticks AND build_ticks > 0) OR (status = 'complete' AND completion_tick IS NULL)),
-		CHECK (x + width <= 1000 AND y + height <= 1000)
+		CHECK (x >= 0 AND y >= 0)
 	)`,
 	`CREATE INDEX IF NOT EXISTS buildings_player_id_idx ON buildings(player_id, id)`,
 	`CREATE INDEX IF NOT EXISTS buildings_completion_idx ON buildings(completion_tick) WHERE status = 'constructing'`,
@@ -106,7 +106,7 @@ var schemaStatements = []string{
 		id TEXT PRIMARY KEY,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
 		building_id TEXT NOT NULL REFERENCES buildings(id) ON DELETE CASCADE,
-		unit_kind TEXT NOT NULL CHECK (unit_kind IN ('soldier', 'archer')),
+		unit_kind TEXT NOT NULL,
 		started_tick BIGINT NOT NULL CHECK (started_tick >= 0),
 		completion_tick BIGINT NOT NULL CHECK (completion_tick > started_tick),
 		UNIQUE (building_id)
@@ -150,7 +150,9 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	if _, err := w.pool.Exec(ctx, `INSERT INTO hill_state (singleton,x,y,control_radius) VALUES (TRUE,$1,$2,$3) ON CONFLICT (singleton) DO NOTHING`, w.hill.X, w.hill.Y, w.hillRadius); err != nil {
 		return fmt.Errorf("initialize hill: %w", err)
 	}
-	if err := w.seedResourceDeposits(ctx); err != nil { return fmt.Errorf("initialize resource deposits: %w", err) }
+	if err := w.seedResourceDeposits(ctx); err != nil {
+		return fmt.Errorf("initialize resource deposits: %w", err)
+	}
 	if playerID == "" || token == "" {
 		return errors.New("development player id and API token must be non-empty")
 	}
@@ -170,7 +172,7 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	if _, err := tx.Exec(ctx, `INSERT INTO player_scores (season_number,player_id,control_ticks) VALUES ($1,$2,0) ON CONFLICT DO NOTHING`, seasonNumber, playerID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO player_resources (player_id, materials) VALUES ($1, 100) ON CONFLICT (player_id) DO NOTHING`, playerID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO player_resources (player_id, materials) VALUES ($1, $2) ON CONFLICT (player_id) DO NOTHING`, playerID, w.config.Economy.StartingMaterials); err != nil {
 		return err
 	}
 	tokenHash := sha256.Sum256([]byte(token))
@@ -193,15 +195,13 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 		return err
 	}
 	if unitCount == 0 {
-		for _, unit := range []Unit{
-			{OwnerID: playerID, Kind: "worker", X: 13, Y: 12},
-			{OwnerID: playerID, Kind: "soldier", X: 14, Y: 12},
-		} {
+		for _, startingUnit := range w.config.World.StartingUnits {
+			unit := Unit{OwnerID: playerID, Kind: startingUnit.Kind, X: startingUnit.X, Y: startingUnit.Y}
 			unit.ID, err = newID()
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO units (id, player_id, kind, x, y) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`, unit.ID, playerID, unit.Kind, unit.X, unit.Y); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO units (id, player_id, kind, x, y, health) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`, unit.ID, playerID, unit.Kind, unit.X, unit.Y, w.unitMaxHealth(unit.Kind)); err != nil {
 				return err
 			}
 		}

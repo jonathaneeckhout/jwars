@@ -12,11 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const (
-	DefaultSeasonDuration = 7 * 24 * time.Hour
-	TicksPerControlPoint  = 60
-)
-
 type Options struct {
 	Hill           Point
 	HillRadius     int
@@ -66,7 +61,7 @@ func (w *World) Scoreboard(ctx context.Context) (Scoreboard, error) {
 		return Scoreboard{}, err
 	}
 	defer tx.Rollback(ctx)
-	board, err := readScoreboard(ctx, tx)
+	board, err := readScoreboard(ctx, tx, w.config.World.TicksPerControlPoint)
 	if err != nil {
 		return Scoreboard{}, err
 	}
@@ -76,7 +71,7 @@ func (w *World) Scoreboard(ctx context.Context) (Scoreboard, error) {
 	return board, nil
 }
 
-func readScoreboard(ctx context.Context, tx pgx.Tx) (Scoreboard, error) {
+func readScoreboard(ctx context.Context, tx pgx.Tx, ticksPerControlPoint int64) (Scoreboard, error) {
 	var board Scoreboard
 	if err := tx.QueryRow(ctx, `SELECT season_number, starts_at, ends_at, status FROM world_season WHERE singleton=TRUE`).
 		Scan(&board.Season.Number, &board.Season.StartsAt, &board.Season.EndsAt, &board.Season.Status); err != nil {
@@ -105,7 +100,7 @@ func readScoreboard(ctx context.Context, tx pgx.Tx) (Scoreboard, error) {
 			rows.Close()
 			return board, err
 		}
-		standing.Score = standing.ControlSeconds / TicksPerControlPoint
+		standing.Score = standing.ControlSeconds / ticksPerControlPoint
 		board.Standings = append(board.Standings, standing)
 	}
 	rows.Close()
@@ -145,7 +140,7 @@ func (w *World) finishAndResetSeason(ctx context.Context, tx pgx.Tx, players []s
 		Scan(&season.Number, &season.StartsAt, &season.EndsAt, &season.Status); err != nil {
 		return err
 	}
-	board, err := readScoreboard(ctx, tx)
+	board, err := readScoreboard(ctx, tx, w.config.World.TicksPerControlPoint)
 	if err != nil {
 		return err
 	}
@@ -188,7 +183,7 @@ func (w *World) finishAndResetSeason(ctx context.Context, tx pgx.Tx, players []s
 	if _, err := tx.Exec(ctx, `DELETE FROM buildings`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE player_resources SET materials=100`); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE player_resources SET materials=$1`, w.config.Economy.StartingMaterials); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE resource_deposits SET amount=capacity`); err != nil {
@@ -221,15 +216,13 @@ func (w *World) finishAndResetSeason(ctx context.Context, tx pgx.Tx, players []s
 }
 
 func (w *World) seedPlayer(ctx context.Context, tx pgx.Tx, playerID string) error {
-	for _, unit := range []Unit{
-		{OwnerID: playerID, Kind: "worker", X: 13, Y: 12},
-		{OwnerID: playerID, Kind: "soldier", X: 14, Y: 12},
-	} {
+	for _, startingUnit := range w.config.World.StartingUnits {
+		unit := Unit{OwnerID: playerID, Kind: startingUnit.Kind, X: startingUnit.X, Y: startingUnit.Y}
 		unitID, err := newID()
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO units (id,player_id,kind,x,y) VALUES ($1,$2,$3,$4,$5)`, unitID, playerID, unit.Kind, unit.X, unit.Y); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO units (id,player_id,kind,x,y,health) VALUES ($1,$2,$3,$4,$5,$6)`, unitID, playerID, unit.Kind, unit.X, unit.Y, w.unitMaxHealth(unit.Kind)); err != nil {
 			return err
 		}
 	}
@@ -304,8 +297,8 @@ func (w *World) updateHillControl(ctx context.Context, tx pgx.Tx, tick int64, pl
 	if _, err := tx.Exec(ctx, `UPDATE player_scores SET control_ticks=$2 WHERE season_number=(SELECT season_number FROM world_season WHERE singleton=TRUE) AND player_id=$1`, *owner, newTicks); err != nil {
 		return err
 	}
-	if newTicks/TicksPerControlPoint > oldTicks/TicksPerControlPoint {
-		score := newTicks/TicksPerControlPoint
+	if newTicks/w.config.World.TicksPerControlPoint > oldTicks/w.config.World.TicksPerControlPoint {
+		score := newTicks / w.config.World.TicksPerControlPoint
 		if err := appendWorldEvent(ctx, tx, Update{PlayerID: *owner, Tick: tick, Type: "score.changed", Score: &score, Hill: &state}); err != nil {
 			return err
 		}

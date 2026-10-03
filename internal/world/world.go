@@ -17,10 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const (
-	EventLimit = 2000
-	MapSize    = 1000
-)
+const EventLimit = 2000
 
 type Unit struct {
 	ID             string  `json:"id"`
@@ -120,8 +117,8 @@ type Update struct {
 	Hill      *HillState  `json:"hill,omitempty"`
 	Standings []Standing  `json:"standings,omitempty"`
 	Winners   []string    `json:"winners,omitempty"`
-	Deposits  []ResourceDeposit `json:"deposits,omitempty"`
-	Training  []TrainingOrder `json:"training,omitempty"`
+	Deposits  []ResourceDeposit  `json:"deposits,omitempty"`
+	Training  []TrainingOrder    `json:"training,omitempty"`
 }
 
 type EntityRef struct {
@@ -139,83 +136,77 @@ type Snapshot struct {
 	Season    SeasonInfo `json:"season"`
 	Hill      HillState `json:"hill"`
 	Score     int64      `json:"score"`
-	Deposits  []ResourceDeposit `json:"deposits"`
-	Training  []TrainingOrder `json:"training"`
+	Deposits  []ResourceDeposit  `json:"deposits"`
+	Training  []TrainingOrder    `json:"training"`
 }
 
 type BuildingDefinition struct {
-	Kind       string `json:"kind"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	Cost       int64  `json:"cost"`
-	BuildTicks int64  `json:"build_ticks"`
-	Starting   bool   `json:"starting,omitempty"`
-	StartX     int    `json:"start_x,omitempty"`
-	StartY     int    `json:"start_y,omitempty"`
-}
-
-type definitionFile struct {
-	Buildings []BuildingDefinition `json:"buildings"`
+	Kind                string `json:"kind"`
+	Width               int    `json:"width"`
+	Height              int    `json:"height"`
+	Cost                int64  `json:"cost"`
+	BuildTicks          int64  `json:"build_ticks"`
+	Starting            bool   `json:"starting,omitempty"`
+	StartX              int    `json:"start_x,omitempty"`
+	StartY              int    `json:"start_y,omitempty"`
+	VisionRange         int    `json:"vision_range"`
+	AttackDamage        int    `json:"attack_damage"`
+	AttackRange         int    `json:"attack_range"`
+	AttackIntervalTicks int64  `json:"attack_interval_ticks"`
 }
 
 type World struct {
-	pool           *pgxpool.Pool
-	definitions    map[string]BuildingDefinition
-	writer         sync.Mutex
-	hill           Point
-	hillRadius     int
-	seasonDuration time.Duration
-	clock          func() time.Time
+	pool            *pgxpool.Pool
+	config          GameConfig
+	definitions     map[string]BuildingDefinition
+	unitDefinitions map[string]UnitDefinition
+	writer          sync.Mutex
+	hill            Point
+	hillRadius      int
+	seasonDuration  time.Duration
+	tickInterval    time.Duration
+	clock           func() time.Time
 }
 
-func New(pool *pgxpool.Pool, definitionsPath string) (*World, error) {
-	return NewWithOptions(pool, definitionsPath, Options{})
+func New(pool *pgxpool.Pool, variablesDirectory string) (*World, error) {
+	return NewWithOptions(pool, variablesDirectory, Options{})
 }
 
-func NewWithOptions(pool *pgxpool.Pool, definitionsPath string, options Options) (*World, error) {
-	content, err := os.ReadFile(definitionsPath)
+func NewWithOptions(pool *pgxpool.Pool, variablesDirectory string, options Options) (*World, error) {
+	config, err := LoadConfig(variablesDirectory)
 	if err != nil {
-		return nil, fmt.Errorf("read building definitions: %w", err)
+		return nil, err
 	}
-	var file definitionFile
-	if err := json.Unmarshal(content, &file); err != nil {
-		return nil, fmt.Errorf("decode building definitions: %w", err)
+	if options.Hill != (Point{}) {
+		config.World.Hill = options.Hill
 	}
-	definitions := make(map[string]BuildingDefinition, len(file.Buildings))
-	for _, definition := range file.Buildings {
-		if definition.Kind == "" || definition.Width < 1 || definition.Height < 1 || definition.Width > MapSize || definition.Height > MapSize {
-			return nil, fmt.Errorf("invalid footprint or kind in building definition %q", definition.Kind)
-		}
-		if definition.Cost < 0 || (!definition.Starting && definition.BuildTicks <= 0) || (definition.Starting && (definition.StartX < 0 || definition.StartY < 0 || definition.StartX+definition.Width > MapSize || definition.StartY+definition.Height > MapSize)) {
-			return nil, fmt.Errorf("invalid cost or build_ticks in building definition %q", definition.Kind)
-		}
-		if _, exists := definitions[definition.Kind]; exists {
-			return nil, fmt.Errorf("duplicate building definition %q", definition.Kind)
-		}
+	if options.HillRadius != 0 {
+		config.World.HillRadius = options.HillRadius
+	}
+	if options.SeasonDuration > 0 {
+		config.World.SeasonDurationSeconds = int64(options.SeasonDuration.Seconds())
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	definitions := make(map[string]BuildingDefinition, len(config.Buildings))
+	for _, definition := range config.Buildings {
 		definitions[definition.Kind] = definition
 	}
-	if len(definitions) == 0 {
-		return nil, errors.New("building definitions must not be empty")
-	}
-	if options.Hill == (Point{}) {
-		options.Hill = Point{X: MapSize / 2, Y: MapSize / 2}
-	}
-	if options.Hill.X < 0 || options.Hill.X >= MapSize || options.Hill.Y < 0 || options.Hill.Y >= MapSize {
-		return nil, errors.New("hill must be inside the map")
-	}
-	if options.HillRadius == 0 {
-		options.HillRadius = 5
-	}
-	if options.HillRadius < 0 {
-		return nil, errors.New("hill radius must not be negative")
-	}
-	if options.SeasonDuration <= 0 {
-		options.SeasonDuration = DefaultSeasonDuration
+	unitDefinitions := make(map[string]UnitDefinition, len(config.Units))
+	for _, definition := range config.Units {
+		unitDefinitions[definition.Kind] = definition
 	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &World{pool: pool, definitions: definitions, hill: options.Hill, hillRadius: options.HillRadius, seasonDuration: options.SeasonDuration, clock: options.Now}, nil
+	return &World{
+		pool: pool, config: config, definitions: definitions, unitDefinitions: unitDefinitions,
+		hill: config.World.Hill, hillRadius: config.World.HillRadius,
+		seasonDuration: time.Duration(config.World.SeasonDurationSeconds) * time.Second,
+		tickInterval: time.Duration(config.World.TickIntervalMillis) * time.Millisecond,
+		clock: options.Now,
+	}, nil
 }
 
 func (w *World) BuildingDefinitions() []BuildingDefinition {
@@ -224,6 +215,15 @@ func (w *World) BuildingDefinitions() []BuildingDefinition {
 		if !definition.Starting {
 			definitions = append(definitions, definition)
 		}
+	}
+	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Kind < definitions[j].Kind })
+	return definitions
+}
+
+func (w *World) UnitDefinitions() []UnitDefinition {
+	definitions := make([]UnitDefinition, 0, len(w.unitDefinitions))
+	for _, definition := range w.unitDefinitions {
+		definitions = append(definitions, definition)
 	}
 	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Kind < definitions[j].Kind })
 	return definitions
@@ -241,7 +241,7 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 	if err := tx.QueryRow(ctx, `SELECT tick FROM world_meta WHERE singleton = TRUE`).Scan(&snapshot.Tick); err != nil {
 		return Snapshot{}, err
 	}
-	snapshot.Deposits, err = loadVisibleDeposits(ctx, tx, playerID)
+	snapshot.Deposits, err = w.loadVisibleDeposits(ctx, tx, playerID)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -249,7 +249,7 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	board, err := readScoreboard(ctx, tx)
+	board, err := readScoreboard(ctx, tx, w.config.World.TicksPerControlPoint)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -305,15 +305,15 @@ func (w *World) Snapshot(ctx context.Context, playerID string) (Snapshot, error)
 	if err := buildingRows.Err(); err != nil {
 		return Snapshot{}, err
 	}
-	visible := visibleEntities(playerID, units, buildings)
+	visible := w.visibleEntities(playerID, units, buildings)
 	for _, unit := range units {
 		if visible[entityKey("unit:"+unit.ID)] {
-			snapshot.Units = append(snapshot.Units, enrichUnit(unit, playerID))
+			snapshot.Units = append(snapshot.Units, w.enrichUnit(unit, playerID))
 		}
 	}
 	for _, building := range buildings {
 		if visible[entityKey("building:"+building.ID)] {
-			snapshot.Buildings = append(snapshot.Buildings, enrichBuilding(building))
+			snapshot.Buildings = append(snapshot.Buildings, w.enrichBuilding(building))
 		}
 	}
 	if snapshot.Units == nil {
@@ -374,7 +374,7 @@ func (w *World) EventsAfter(ctx context.Context, playerID string, sequence int64
 }
 
 func (w *World) Run(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(w.tickInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -430,7 +430,7 @@ func (w *World) Step(ctx context.Context) error {
 		return err
 	}
 
-	combatResult, err := advanceCombatTick(ctx, tx, tick, beforeUnits, beforeBuildings, beforeDeposits)
+	combatResult, err := w.advanceCombatTick(ctx, tx, tick, beforeUnits, beforeBuildings, beforeDeposits)
 	if err != nil {
 		return err
 	}
@@ -476,7 +476,7 @@ func (w *World) Step(ctx context.Context) error {
 	}
 	for playerID, buildings := range progressBuildings {
 		for i := range buildings {
-			buildings[i] = enrichBuilding(buildings[i])
+			buildings[i] = w.enrichBuilding(buildings[i])
 		}
 		update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.progress", Buildings: buildings}
 		if _, err := appendEvent(ctx, tx, update); err != nil {
@@ -485,7 +485,7 @@ func (w *World) Step(ctx context.Context) error {
 	}
 	for playerID, buildings := range completedBuildings {
 		for i := range buildings {
-			buildings[i] = enrichBuilding(buildings[i])
+			buildings[i] = w.enrichBuilding(buildings[i])
 		}
 		update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.completed", Buildings: buildings}
 		if _, err := appendEvent(ctx, tx, update); err != nil {
@@ -493,7 +493,7 @@ func (w *World) Step(ctx context.Context) error {
 		}
 	}
 
-	if err := regenerateDeposits(ctx, tx, tick); err != nil {
+	if err := w.regenerateDeposits(ctx, tx, tick); err != nil {
 		return err
 	}
 	if err := w.completeTrainingOrders(ctx, tx, tick); err != nil {
@@ -508,7 +508,7 @@ func (w *World) Step(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := advanceGathering(ctx, tx, tick, afterUnits, afterDeposits); err != nil {
+	if err := w.advanceGathering(ctx, tx, tick, afterUnits, afterDeposits); err != nil {
 		return err
 	}
 	afterDeposits, err = loadResourceDeposits(ctx, tx)
@@ -525,7 +525,7 @@ func (w *World) Step(ctx context.Context) error {
 	if err := w.updateHillControl(ctx, tx, tick, playerIDs, afterUnits); err != nil {
 		return err
 	}
-	if err := emitWorldEvents(ctx, tx, tick, playerIDs, beforeUnits, beforeBuildings, afterUnits, afterBuildings, beforeDeposits, afterDeposits, combatResult.destroyed); err != nil {
+	if err := w.emitWorldEvents(ctx, tx, tick, playerIDs, beforeUnits, beforeBuildings, afterUnits, afterBuildings, beforeDeposits, afterDeposits, combatResult.destroyed); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -587,7 +587,7 @@ func (w *World) ApplyCommand(ctx context.Context, playerID string, command Comma
 
 func (w *World) applyMove(ctx context.Context, tx pgx.Tx, playerID string, tick int64, command Command) (CommandResult, error) {
 	result := CommandResult{ID: command.ID}
-	if command.Target == nil || !insideMap(command.Target.X, command.Target.Y) {
+	if command.Target == nil || !w.insideMap(command.Target.X, command.Target.Y) {
 		result.Reason = "target must be within map bounds (0..999)"
 		return result, nil
 	}
@@ -675,7 +675,7 @@ func (w *World) applyAttack(ctx context.Context, tx pgx.Tx, playerID string, tic
 	if err != nil {
 		return result, err
 	}
-	visible := visibleEntities(playerID, units, buildings)
+	visible := w.visibleEntities(playerID, units, buildings)
 	var target *Unit
 	for i := range units {
 		if units[i].ID == command.TargetUnitID && units[i].OwnerID != playerID {
@@ -698,7 +698,7 @@ func (w *World) applyAttack(ctx context.Context, tx pgx.Tx, playerID string, tic
 		return result, nil
 	}
 	for _, id := range command.UnitIDs {
-		if unitAttackDamage(selected[id].Kind) == 0 {
+		if w.unitAttackDamage(selected[id].Kind) == 0 {
 			result.Reason = "one or more selected units cannot attack"
 			return result, nil
 		}
@@ -732,7 +732,7 @@ func (w *World) applyBuild(ctx context.Context, tx pgx.Tx, playerID string, tick
 		result.Reason = "unknown or non-buildable building type"
 		return result, nil
 	}
-	if command.X == nil || command.Y == nil || *command.X < 0 || *command.Y < 0 || *command.X+definition.Width > MapSize || *command.Y+definition.Height > MapSize {
+	if command.X == nil || command.Y == nil || !w.insideMap(*command.X, *command.Y) || *command.X+definition.Width > w.config.World.MapSize || *command.Y+definition.Height > w.config.World.MapSize {
 		result.Reason = "building footprint must fit within map bounds (0..999)"
 		return result, nil
 	}
@@ -793,7 +793,7 @@ func (w *World) applyBuild(ctx context.Context, tx pgx.Tx, playerID string, tick
 		return result, err
 	}
 	setBuildingProgress(&building, tick)
-	building = enrichBuilding(building)
+	building = w.enrichBuilding(building)
 	update := Update{PlayerID: playerID, Tick: tick, Type: "buildings.started", Buildings: []Building{building}, Resources: []Resource{{Kind: "materials", Amount: materials}}}
 	sequence, err := appendEvent(ctx, tx, update)
 	if err != nil {
@@ -815,7 +815,7 @@ func (w *World) applyBuild(ctx context.Context, tx pgx.Tx, playerID string, tick
 		if observerID == playerID {
 			continue
 		}
-		visible := visibleEntities(observerID, allUnits, allBuildings)
+		visible := w.visibleEntities(observerID, allUnits, allBuildings)
 		if visible[entityKey("building:"+building.ID)] {
 			if err := appendWorldEvent(ctx, tx, Update{PlayerID: observerID, Tick: tick, Type: "buildings.spotted", Buildings: []Building{building}}); err != nil {
 				return result, err
@@ -840,7 +840,7 @@ func (w *World) applyGather(ctx context.Context, tx pgx.Tx, playerID string, tic
 	if err != nil { return result, err }
 	var deposit *ResourceDeposit
 	for i := range deposits {
-		if deposits[i].ID == command.DepositID && depositVisible(playerID, deposits[i], units, buildings) {
+		if deposits[i].ID == command.DepositID && w.depositVisible(playerID, deposits[i], units, buildings) {
 			deposit = &deposits[i]
 			break
 		}
@@ -884,43 +884,32 @@ func (w *World) applyTrain(ctx context.Context, tx pgx.Tx, playerID string, tick
 		result.Reason = "building_id is required"
 		return result, nil
 	}
-	cost, duration, validKind := trainingCostAndDuration(command.UnitKind)
-	if !validKind {
-		result.Reason = "unit_kind must be soldier or archer"
+	unitDefinition, validKind := w.unitDefinitions[command.UnitKind]
+	if !validKind || unitDefinition.TrainingTicks == 0 {
+		result.Reason = "unit_kind is not trainable"
 		return result, nil
 	}
 	var buildingStatus, buildingKind string
 	err := tx.QueryRow(ctx, `SELECT kind,status FROM buildings WHERE id=$1 AND player_id=$2 FOR UPDATE`, command.BuildingID, playerID).Scan(&buildingKind, &buildingStatus)
-	if errors.Is(err, pgx.ErrNoRows) { result.Reason = "barracks is unavailable to this player"; return result, nil }
+	if errors.Is(err, pgx.ErrNoRows) { result.Reason = "training building is unavailable to this player"; return result, nil }
 	if err != nil { return result, err }
-	if buildingKind != "barracks" || buildingStatus != "complete" { result.Reason = "training requires a completed barracks"; return result, nil }
+	if buildingKind != unitDefinition.TrainingBuilding || buildingStatus != "complete" { result.Reason = "training requires a completed " + unitDefinition.TrainingBuilding; return result, nil }
 	var busy bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM training_orders WHERE building_id=$1)`, command.BuildingID).Scan(&busy); err != nil { return result, err }
-	if busy { result.Reason = "barracks training queue is busy"; return result, nil }
+	if busy { result.Reason = "training queue is busy"; return result, nil }
 	var materials int64
 	if err := tx.QueryRow(ctx, `SELECT materials FROM player_resources WHERE player_id=$1 FOR UPDATE`, playerID).Scan(&materials); err != nil { return result, err }
-	if materials < cost { result.Reason = "not enough materials"; return result, nil }
+	if materials < unitDefinition.TrainingCost { result.Reason = "not enough materials"; return result, nil }
 	orderID, err := newID()
 	if err != nil { return result, err }
-	order := TrainingOrder{ID: orderID, BuildingID: command.BuildingID, UnitKind: command.UnitKind, StartedTick: tick, CompletionTick: tick+duration}
+	order := TrainingOrder{ID: orderID, BuildingID: command.BuildingID, UnitKind: command.UnitKind, StartedTick: tick, CompletionTick: tick+unitDefinition.TrainingTicks}
 	if _, err := tx.Exec(ctx, `INSERT INTO training_orders (id,player_id,building_id,unit_kind,started_tick,completion_tick) VALUES ($1,$2,$3,$4,$5,$6)`, order.ID, playerID, order.BuildingID, order.UnitKind, order.StartedTick, order.CompletionTick); err != nil { return result, err }
-	materials -= cost
+	materials -= unitDefinition.TrainingCost
 	if _, err := tx.Exec(ctx, `UPDATE player_resources SET materials=$2 WHERE player_id=$1`, playerID, materials); err != nil { return result, err }
 	sequence, err := appendEvent(ctx, tx, Update{PlayerID: playerID, Tick: tick, Type: "training.started", Training: []TrainingOrder{order}, Resources: []Resource{{Kind: "materials", Amount: materials}}})
 	if err != nil { return result, err }
 	result.Accepted, result.Sequence = true, sequence
 	return result, nil
-}
-
-func trainingCostAndDuration(kind string) (int64, int64, bool) {
-	switch kind {
-	case "soldier":
-		return 25, 15, true
-	case "archer":
-		return 40, 25, true
-	default:
-		return 0, 0, false
-	}
 }
 
 func stepToward(x, y, targetX, targetY int) (int, int) {
@@ -936,8 +925,8 @@ func stepToward(x, y, targetX, targetY int) (int, int) {
 	return x, y
 }
 
-func insideMap(x, y int) bool {
-	return x >= 0 && x < MapSize && y >= 0 && y < MapSize
+func (w *World) insideMap(x, y int) bool {
+	return w.config.World.contains(x, y)
 }
 
 func newID() (string, error) {

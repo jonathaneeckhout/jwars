@@ -6,14 +6,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var initialDepositLocations = []Point{
-	{X: 20, Y: 12}, {X: 45, Y: 12}, {X: 150, Y: 150}, {X: 250, Y: 750},
-	{X: 400, Y: 400}, {X: 500, Y: 450}, {X: 500, Y: 550}, {X: 600, Y: 600},
-	{X: 750, Y: 250}, {X: 850, Y: 850}, {X: 950, Y: 50}, {X: 50, Y: 950},
-}
-
-const initialDepositCapacity = 500
-
 func (w *World) seedResourceDeposits(ctx context.Context) error {
 	var count int
 	if err := w.pool.QueryRow(ctx, `SELECT count(*) FROM resource_deposits`).Scan(&count); err != nil {
@@ -27,12 +19,12 @@ func (w *World) seedResourceDeposits(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	for _, point := range initialDepositLocations {
+	for _, point := range w.config.Economy.DepositLocations {
 		id, err := newID()
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO resource_deposits (id,kind,x,y,amount,capacity) VALUES ($1,'materials',$2,$3,$4,$4)`, id, point.X, point.Y, initialDepositCapacity); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO resource_deposits (id,kind,x,y,amount,capacity) VALUES ($1,'materials',$2,$3,$4,$4)`, id, point.X, point.Y, w.config.Economy.DepositCapacity); err != nil {
 			return err
 		}
 	}
@@ -56,7 +48,7 @@ func loadResourceDeposits(ctx context.Context, tx pgx.Tx) ([]ResourceDeposit, er
 	return deposits, rows.Err()
 }
 
-func loadVisibleDeposits(ctx context.Context, tx pgx.Tx, playerID string) ([]ResourceDeposit, error) {
+func (w *World) loadVisibleDeposits(ctx context.Context, tx pgx.Tx, playerID string) ([]ResourceDeposit, error) {
 	units, err := loadUnits(ctx, tx, false)
 	if err != nil {
 		return nil, err
@@ -71,32 +63,32 @@ func loadVisibleDeposits(ctx context.Context, tx pgx.Tx, playerID string) ([]Res
 	}
 	visible := make([]ResourceDeposit, 0)
 	for _, deposit := range deposits {
-		if depositVisible(playerID, deposit, units, buildings) {
+		if w.depositVisible(playerID, deposit, units, buildings) {
 			visible = append(visible, deposit)
 		}
 	}
 	return visible, nil
 }
 
-func depositVisible(playerID string, deposit ResourceDeposit, units []Unit, buildings []Building) bool {
+func (w *World) depositVisible(playerID string, deposit ResourceDeposit, units []Unit, buildings []Building) bool {
 	for _, unit := range units {
-		if unit.OwnerID == playerID && chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) <= unitVisionRange(unit.Kind) {
+		if unit.OwnerID == playerID && chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) <= w.unitVisionRange(unit.Kind) {
 			return true
 		}
 	}
 	for _, building := range buildings {
-		if building.OwnerID == playerID && buildingVisionRange(building) > 0 && chebyshevToBuilding(deposit.X, deposit.Y, building) <= buildingVisionRange(building) {
+		if building.OwnerID == playerID && w.buildingVisionRange(building) > 0 && chebyshevToBuilding(deposit.X, deposit.Y, building) <= w.buildingVisionRange(building) {
 			return true
 		}
 	}
 	return false
 }
 
-func regenerateDeposits(ctx context.Context, tx pgx.Tx, tick int64) error {
-	if tick%60 != 0 {
+func (w *World) regenerateDeposits(ctx context.Context, tx pgx.Tx, tick int64) error {
+	if tick%w.config.Economy.DepositRegenerationIntervalTicks != 0 {
 		return nil
 	}
-	_, err := tx.Exec(ctx, `UPDATE resource_deposits SET amount=LEAST(capacity,amount+1) WHERE amount<capacity`)
+	_, err := tx.Exec(ctx, `UPDATE resource_deposits SET amount=LEAST(capacity,amount+$1) WHERE amount<capacity`, w.config.Economy.DepositRegenerationAmount)
 	return err
 }
 
@@ -148,7 +140,7 @@ func (w *World) completeTrainingOrders(ctx context.Context, tx pgx.Tx, tick int6
 		if err := tx.QueryRow(ctx, `SELECT id,player_id,kind,x,y,width,height,status,started_tick,build_ticks FROM buildings WHERE id=$1`, item.order.BuildingID).Scan(&building.ID, &building.OwnerID, &building.Kind, &building.X, &building.Y, &building.Width, &building.Height, &building.Status, &building.StartedTick, &building.BuildTicks); err != nil {
 			return err
 		}
-		x, y, found, err := trainingSpawn(ctx, tx, building)
+		x, y, found, err := w.trainingSpawn(ctx, tx, building)
 		if err != nil {
 			return err
 		}
@@ -159,13 +151,13 @@ func (w *World) completeTrainingOrders(ctx context.Context, tx pgx.Tx, tick int6
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO units (id,player_id,kind,x,y,health) VALUES ($1,$2,$3,$4,$5,$6)`, unitID, item.playerID, item.order.UnitKind, x, y, unitMaxHealth(item.order.UnitKind)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO units (id,player_id,kind,x,y,health) VALUES ($1,$2,$3,$4,$5,$6)`, unitID, item.playerID, item.order.UnitKind, x, y, w.unitMaxHealth(item.order.UnitKind)); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM training_orders WHERE id=$1`, item.order.ID); err != nil {
 			return err
 		}
-		unit := enrichUnit(Unit{ID: unitID, OwnerID: item.playerID, Kind: item.order.UnitKind, X: x, Y: y, Health: unitMaxHealth(item.order.UnitKind)}, item.playerID)
+		unit := w.enrichUnit(Unit{ID: unitID, OwnerID: item.playerID, Kind: item.order.UnitKind, X: x, Y: y, Health: w.unitMaxHealth(item.order.UnitKind)}, item.playerID)
 		if err := appendWorldEvent(ctx, tx, Update{PlayerID: item.playerID, Tick: tick, Type: "training.completed", Units: []Unit{unit}, Training: []TrainingOrder{item.order}}); err != nil {
 			return err
 		}
@@ -173,7 +165,7 @@ func (w *World) completeTrainingOrders(ctx context.Context, tx pgx.Tx, tick int6
 	return nil
 }
 
-func trainingSpawn(ctx context.Context, tx pgx.Tx, barracks Building) (int, int, bool, error) {
+func (w *World) trainingSpawn(ctx context.Context, tx pgx.Tx, barracks Building) (int, int, bool, error) {
 	units, err := loadUnits(ctx, tx, false)
 	if err != nil {
 		return 0, 0, false, err
@@ -191,7 +183,7 @@ func trainingSpawn(ctx context.Context, tx pgx.Tx, barracks Building) (int, int,
 			Point{X: barracks.X + barracks.Width, Y: barracks.Y + offset})
 	}
 	for _, point := range candidates {
-		if !insideMap(point.X, point.Y) {
+		if !w.insideMap(point.X, point.Y) {
 			continue
 		}
 		occupied := false
@@ -217,7 +209,7 @@ func trainingSpawn(ctx context.Context, tx pgx.Tx, barracks Building) (int, int,
 	return 0, 0, false, nil
 }
 
-func advanceGathering(ctx context.Context, tx pgx.Tx, tick int64, units []Unit, deposits []ResourceDeposit) error {
+func (w *World) advanceGathering(ctx context.Context, tx pgx.Tx, tick int64, units []Unit, deposits []ResourceDeposit) error {
 	depositByID := make(map[string]ResourceDeposit, len(deposits))
 	for _, deposit := range deposits {
 		depositByID[deposit.ID] = deposit
@@ -232,9 +224,9 @@ func advanceGathering(ctx context.Context, tx pgx.Tx, tick int64, units []Unit, 
 		if !exists {
 			unit.GatherTargetID = nil
 			unit.GatherProgress = 0
-		} else if chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) <= 1 {
+		} else if chebyshev(unit.X, unit.Y, deposit.X, deposit.Y) <= w.config.Economy.GatherRange {
 			unit.GatherProgress++
-			if unit.GatherProgress >= 5 {
+			if int64(unit.GatherProgress) >= w.config.Economy.GatherIntervalTicks {
 				unit.GatherProgress = 0
 				var remaining int
 				err := tx.QueryRow(ctx, `UPDATE resource_deposits SET amount=amount-1 WHERE id=$1 AND amount>0 RETURNING amount`, deposit.ID).Scan(&remaining)

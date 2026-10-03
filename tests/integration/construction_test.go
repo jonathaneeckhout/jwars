@@ -78,7 +78,7 @@ func TestConstructionProgress_SurvivesWorldReinitialization(t *testing.T) {
 		t.Fatalf("read snapshot before reinitialization: %v", err)
 	}
 
-	reloadedWorld, err := world.New(testPool, testBuildingDefsPath)
+	reloadedWorld, err := world.New(testPool, testVariablesDir)
 	if err != nil {
 		t.Fatalf("create reloaded world: %v", err)
 	}

@@ -27,7 +27,7 @@ func run() error {
 	playerID := env("JWARS_PLAYER_ID", "player-1")
 	token := env("JWARS_API_TOKEN", "dev-token")
 	addr := env("JWARS_ADDR", "127.0.0.1:8080")
-	definitionsPath := env("JWARS_BUILDING_DEFS", "definitions/buildings.json")
+	variablesDirectory := env("JWARS_VARIABLES_DIR", "variables")
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelConnect()
@@ -40,7 +40,7 @@ func run() error {
 		return err
 	}
 
-	w, err := world.New(pool, definitionsPath)
+	w, err := world.New(pool, variablesDirectory)
 	if err != nil {
 		return err
 	}

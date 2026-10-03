@@ -104,6 +104,8 @@ List the server-defined building types, then issue a build order with a type and
 ```sh
 curl -H "Authorization: Bearer $JWARS_API_TOKEN" \
   "$JWARS_API_URL/v1/definitions/buildings" | jq .
+curl -H "Authorization: Bearer $JWARS_API_TOKEN" \
+  "$JWARS_API_URL/v1/definitions/units" | jq .
 ./tools/build.sh barracks 20 20
 ./tools/build.sh watchtower 24 20
 ```
