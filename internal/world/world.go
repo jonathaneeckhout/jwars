@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jojo/jwars/internal/accounts"
 )
 
 const EventLimit = 2000
@@ -175,6 +176,8 @@ type World struct {
 	tickInterval    time.Duration
 	clock           func() time.Time
 }
+
+func (w *World) AccountStore() *accounts.Store { return accounts.NewStore(w.pool) }
 
 func New(pool *pgxpool.Pool, variablesDirectory string) (*World, error) {
 	return NewWithOptions(pool, variablesDirectory, Options{})

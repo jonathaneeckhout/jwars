@@ -28,20 +28,39 @@ That removes all local player and world data in the Compose database volume and 
 | `JWARS_ADDR` | `127.0.0.1:8080` | HTTP listen address |
 | `JWARS_API_TOKEN` | `dev-token` | Development bearer token, stored as a SHA-256 hash |
 | `JWARS_PLAYER_ID` | `player-1` | Player associated with the development token |
+| `JWARS_SEED_DEV_PLAYER` | `true` | Set to `false` to disable the local development player in production |
 | `JWARS_VARIABLES_DIR` | `variables/` | JSON game settings and entity definitions |
+| `JWARS_UI_SESSION_SECRET` | generated in development | Secret used to sign NiceGUI browser sessions; set a stable secret in production |
+| `JWARS_API_ORIGIN` | `http://127.0.0.1:8080` | Go API origin used by the NiceGUI service |
+| `JWARS_UI_HOST` | `127.0.0.1` | NiceGUI listen address |
+| `JWARS_UI_PORT` | `8081` | NiceGUI listen port |
+| `JWARS_UI_HTTPS_ONLY` | `false` | Set to `true` when the portal is served over HTTPS |
 
 ## API
 
-Player registration and current-season status are public. All game endpoints use `Authorization: Bearer <token>`; the token resolves to a player, and state, commands, and event cursors are player-scoped.
+The player portal uses NiceGUI (Python) and runs separately from the Go API. Player accounts use usernames and passwords, with no email or self-service recovery. On first startup with an empty account table, the Go server creates an `admin` account and prints a generated temporary password to its log. Save that password, sign in to the portal, and change it immediately; the account requires a password change before other actions are available.
 
-Check the current season and create a player during the 24-hour enrollment window. Registration returns a random player ID and a token once; save the token in the client because the server stores only its hash. The new player joins immediately and receives the standard starting base, worker, soldier, and 100 materials.
+If the admin loses access, the operator can issue a temporary password from the terminal with `go run ./cmd/jwars-admin reset-admin-password <username>`; share it directly and change it at next sign-in.
+
+Install and start the NiceGUI portal:
 
 ```sh
-./tools/season.sh
-./tools/register_player.sh
+python3 -m venv web/.venv
+web/.venv/bin/pip install -r web/requirements.txt
+./tools/run_ui.sh
 ```
 
-Players keep their ID and token between seasons, but must explicitly join each new season during its enrollment window:
+Run these commands from the repository root. In production set `JWARS_SEED_DEV_PLAYER=false`, `JWARS_ENV=production`, a stable `JWARS_UI_SESSION_SECRET`, `JWARS_UI_HTTPS_ONLY=true`, and `JWARS_API_ORIGIN` to the private Go API address. Keep the NiceGUI service behind HTTPS and a reverse proxy.
+
+Accounts can be created at any time; joining a season remains limited to its enrollment window. From the account dashboard, players can change their public display name and password, join an open season, and create, name, or revoke API tokens. A new token is shown only once. Players use it with `Authorization: Bearer <token>` for game endpoints.
+
+The admin dashboard can issue a temporary password that must be changed on next sign-in, or suspend/unsuspend an account. No email is collected, so admins must share temporary passwords directly. Suspended accounts cannot sign in or use game API tokens. Admins cannot view token secrets.
+
+Player registration, current-season status, and the scoreboard are public. Player game endpoints use an API token; account management endpoints use a separate server-side session token held by the NiceGUI service. Player state, commands, and event cursors remain scoped to the authenticated player.
+
+The original direct API registration endpoint (`POST /v1/players`) remains available for command-line clients. It creates a player and joins the current season immediately; portal accounts use `POST /v1/accounts` and join separately.
+
+Players keep their player ID and API tokens between seasons, but must explicitly join each season during its enrollment window:
 
 ```sh
 JWARS_API_TOKEN='<saved-token>' ./tools/join_season.sh
@@ -53,7 +72,7 @@ Get the current player-visible snapshot and available unit/building definitions:
 
 ```sh
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/world
-curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/scoreboard
+curl http://127.0.0.1:8080/v1/scoreboard
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/buildings
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/units
 ```
@@ -115,4 +134,4 @@ Convenience Bash scripts for snapshots, scores and standings, listening, move an
 
 The server stores players, token hashes, units, buildings, resources, deposits, training orders, command results, per-player event sequences, and a bounded event history in PostgreSQL. Tick and command writes are serialized by one Go process and persisted with their corresponding events in one transaction. Gameplay settings and entity stats load from JSON files under `variables/`. World time pauses during server downtime and resumes from the last committed tick.
 
-There is no account recovery, terrain-based line of sight, remembered fog-of-war state, resource balancing, multi-process coordination, or automatic schema migration yet. The environment-seeded player/token is for local development; change it before using the server beyond localhost.
+There is no automated account recovery; admins reset passwords manually. Terrain-based line of sight, remembered fog-of-war state, resource balancing, multi-process coordination, and automatic schema migration are also not implemented. The environment-seeded player/token is for local development; change it before using the server beyond localhost.

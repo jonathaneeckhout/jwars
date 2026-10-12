@@ -47,6 +47,26 @@ var schemaStatements = []string{
 		player_id TEXT PRIMARY KEY,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+	`CREATE TABLE IF NOT EXISTS player_accounts (
+		player_id TEXT PRIMARY KEY REFERENCES players(player_id),
+		username TEXT NOT NULL,
+		password_hash BYTEA NOT NULL,
+		password_salt BYTEA NOT NULL,
+		display_name TEXT NOT NULL,
+		is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+		suspended_at TIMESTAMPTZ,
+		must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS player_accounts_username_lower_idx ON player_accounts (LOWER(username))`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS player_accounts_display_name_lower_idx ON player_accounts (LOWER(display_name))`,
+	`CREATE TABLE IF NOT EXISTS account_sessions (
+		session_hash BYTEA PRIMARY KEY,
+		player_id TEXT NOT NULL REFERENCES player_accounts(player_id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS account_sessions_player_id_idx ON account_sessions(player_id)`,
 	`CREATE TABLE IF NOT EXISTS season_players (
 		season_number BIGINT NOT NULL,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
@@ -57,8 +77,16 @@ var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS api_tokens (
 		token_hash BYTEA PRIMARY KEY,
 		player_id TEXT NOT NULL REFERENCES players(player_id),
+		token_id TEXT,
+		name TEXT NOT NULL DEFAULT 'Legacy token',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	)`,
+	`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS token_id TEXT`,
+	`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Legacy token'`,
+	`UPDATE api_tokens SET token_id=encode(token_hash,'hex') WHERE token_id IS NULL`,
+	`ALTER TABLE api_tokens ALTER COLUMN token_id SET NOT NULL`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_token_id_idx ON api_tokens(token_id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_player_name_idx ON api_tokens(player_id,LOWER(name))`,
 	`CREATE INDEX IF NOT EXISTS api_tokens_player_id_idx ON api_tokens(player_id)`,
 	`CREATE TABLE IF NOT EXISTS player_resources (
 		player_id TEXT PRIMARY KEY REFERENCES players(player_id),
@@ -175,8 +203,11 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 	if err := w.seedResourceDeposits(ctx); err != nil {
 		return fmt.Errorf("initialize resource deposits: %w", err)
 	}
+	if playerID == "" && token == "" {
+		return nil
+	}
 	if playerID == "" || token == "" {
-		return errors.New("development player id and API token must be non-empty")
+		return errors.New("development player id and API token must either both be set or both be empty")
 	}
 
 	tx, err := w.pool.Begin(ctx)
@@ -212,10 +243,11 @@ func (w *World) Initialize(ctx context.Context, playerID, token string) error {
 		return err
 	}
 	tokenHash := sha256.Sum256([]byte(token))
-	if _, err := tx.Exec(ctx, `DELETE FROM api_tokens WHERE player_id = $1`, playerID); err != nil {
+	tokenID, err := newID()
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO api_tokens (token_hash, player_id) VALUES ($1, $2) ON CONFLICT (token_hash) DO NOTHING`, tokenHash[:], playerID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO api_tokens (token_id, token_hash, player_id, name) VALUES ($1, $2, $3, 'Development token') ON CONFLICT (token_hash) DO NOTHING`, tokenID, tokenHash[:], playerID); err != nil {
 		return err
 	}
 	var tokenOwner string
@@ -303,7 +335,9 @@ func (w *World) PlayerForToken(ctx context.Context, token string) (string, error
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 	var playerID string
-	err := w.pool.QueryRow(ctx, `SELECT player_id FROM api_tokens WHERE token_hash = $1`, tokenHash[:]).Scan(&playerID)
+	err := w.pool.QueryRow(ctx, `SELECT t.player_id FROM api_tokens t
+		LEFT JOIN player_accounts a ON a.player_id=t.player_id
+		WHERE t.token_hash=$1 AND a.suspended_at IS NULL`, tokenHash[:]).Scan(&playerID)
 	return playerID, err
 }
 

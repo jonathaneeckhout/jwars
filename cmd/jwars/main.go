@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,9 @@ func run() error {
 	databaseURL := env("DATABASE_URL", "postgres://jwars:jwars@127.0.0.1:5432/jwars?sslmode=disable")
 	playerID := env("JWARS_PLAYER_ID", "player-1")
 	token := env("JWARS_API_TOKEN", "dev-token")
+	if strings.EqualFold(env("JWARS_SEED_DEV_PLAYER", "true"), "false") {
+		playerID, token = "", ""
+	}
 	addr := env("JWARS_ADDR", "127.0.0.1:8080")
 	variablesDirectory := env("JWARS_VARIABLES_DIR", "variables")
 
@@ -46,6 +50,13 @@ func run() error {
 	}
 	if err := w.Initialize(connectCtx, playerID, token); err != nil {
 		return err
+	}
+	adminPassword, adminCreated, err := w.AccountStore().EnsureInitialAdmin(connectCtx)
+	if err != nil {
+		return fmt.Errorf("initialize administrator account: %w", err)
+	}
+	if adminCreated {
+		log.Printf("INITIAL ADMIN CREATED: username=admin temporary_password=%s; sign in to the player portal and change it immediately", adminPassword)
 	}
 
 	worldCtx, stopWorld := context.WithCancel(context.Background())
@@ -71,7 +82,11 @@ func run() error {
 		}
 	}()
 
-	log.Printf("jwars listening on %s (development player %s)", addr, playerID)
+	if playerID == "" {
+		log.Printf("jwars listening on %s", addr)
+	} else {
+		log.Printf("jwars listening on %s (development player %s)", addr, playerID)
+	}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

@@ -134,11 +134,15 @@ func (w *World) RegisterPlayer(ctx context.Context) (PlayerRegistration, error) 
 		return PlayerRegistration{}, err
 	}
 	token := hex.EncodeToString(secret[:])
+	tokenID, err := newID()
+	if err != nil {
+		return PlayerRegistration{}, err
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO players (player_id) VALUES ($1)`, playerID); err != nil {
 		return PlayerRegistration{}, err
 	}
 	tokenHash := sha256.Sum256([]byte(token))
-	if _, err := tx.Exec(ctx, `INSERT INTO api_tokens (token_hash,player_id) VALUES ($1,$2)`, tokenHash[:], playerID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO api_tokens (token_id,token_hash,player_id,name) VALUES ($1,$2,$3,'API client')`, tokenID, tokenHash[:], playerID); err != nil {
 		return PlayerRegistration{}, err
 	}
 	join, err := w.joinPlayerTx(ctx, tx, playerID, season, true)
@@ -253,6 +257,7 @@ type HillState struct {
 
 type Standing struct {
 	PlayerID       string `json:"player_id"`
+	DisplayName    string `json:"display_name"`
 	Score          int64  `json:"score"`
 	ControlSeconds int64  `json:"control_seconds"`
 }
@@ -304,9 +309,10 @@ func readScoreboard(ctx context.Context, tx pgx.Tx, ticksPerControlPoint int64) 
 		board.Hill.OwnerID = &owner.String
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT p.player_id, COALESCE(s.control_ticks,0)
+		SELECT p.player_id, COALESCE(a.display_name,p.player_id), COALESCE(s.control_ticks,0)
 		FROM season_players p LEFT JOIN player_scores s
 		ON s.player_id=p.player_id AND s.season_number=$1
+		LEFT JOIN player_accounts a ON a.player_id=p.player_id
 		WHERE p.season_number=$1
 		ORDER BY p.player_id`, board.Season.Number)
 	if err != nil {
@@ -315,7 +321,7 @@ func readScoreboard(ctx context.Context, tx pgx.Tx, ticksPerControlPoint int64) 
 	board.Standings = make([]Standing, 0)
 	for rows.Next() {
 		var standing Standing
-		if err := rows.Scan(&standing.PlayerID, &standing.ControlSeconds); err != nil {
+		if err := rows.Scan(&standing.PlayerID, &standing.DisplayName, &standing.ControlSeconds); err != nil {
 			rows.Close()
 			return board, err
 		}
