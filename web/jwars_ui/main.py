@@ -83,18 +83,45 @@ def date_label(value: str | None) -> str:
         return value
 
 
+def render_scoreboard(board: dict[str, Any] | None) -> None:
+    season = board.get("season", {}) if board else {}
+    with ui.card().classes("jwars-card w-full p-6"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("The hill decides the season").classes("text-xl font-semibold")
+            status = season.get("status", "offline")
+            ui.label(status.upper()).classes("jwars-kicker jwars-green")
+        if board and board.get("standings"):
+            with ui.column().classes("w-full gap-0 pt-3"):
+                for rank, standing in enumerate(board["standings"], 1):
+                    with ui.row().classes("w-full items-center justify-between border-b border-[#2a342c] py-3"):
+                        ui.label(f"{rank:02d}  {player_name(standing)}").classes("text-sm")
+                        ui.label(f"{standing.get('score', 0)} PTS").classes("jwars-green jwars-mono text-sm")
+        elif board:
+            ui.label("No commanders on the board yet. Join this season to get started.").classes("text-sm text-grey-5 py-8")
+        else:
+            ui.label("Standings are temporarily unavailable.").classes("text-sm text-grey-5 py-8")
+        if season:
+            ui.label(f"Season ends {date_label(season.get('ends_at'))} · {len(board.get('standings', []))} commanders").classes("jwars-kicker pt-3")
+
+
 @ui.page("/")
 async def home() -> None:
     shell("A world that keeps moving")
     with ui.column().classes("jwars-page gap-10"):
-        try:
-            board = await request("GET", "/v1/scoreboard")
-        except APIError:
-            board = None
-        season = board.get("season", {}) if board else {}
+        @ui.refreshable
+        async def live_scoreboard() -> None:
+            try:
+                board = await request("GET", "/v1/scoreboard")
+            except APIError:
+                board = None
+            season = board.get("season", {}) if board else {}
+            season_label.set_text(f"SEASON {season.get('number', '—')}  /  {str(season.get('status', 'OFFLINE')).upper()}")
+            connection_label.set_text("● WORLD ONLINE" if board else "● WORLD UNAVAILABLE")
+            render_scoreboard(board)
+
         with ui.row().classes("w-full items-center justify-between pt-12"):
-            ui.label(f"SEASON {season.get('number', '—')}  /  {str(season.get('status', 'WORLD ONLINE')).upper()}").classes("jwars-kicker")
-            ui.label("● WORLD ONLINE").classes("jwars-kicker jwars-green")
+            season_label = ui.label("SEASON —").classes("jwars-kicker")
+            connection_label = ui.label("● WORLD ONLINE").classes("jwars-kicker jwars-green")
         ui.html('<div class="jwars-title">A world that<br>keeps <em>moving.</em></div>')
         ui.label("Build your base. Command your forces. Hold the hill. JWARS is a persistent strategy game where every order shapes a living world.").classes("jwars-subtitle text-base")
         with ui.row().classes("items-center gap-4"):
@@ -102,7 +129,7 @@ async def home() -> None:
             ui.link("Read the API guide →", "/api").classes("jwars-link")
 
         with ui.row().classes("w-full gap-4"):
-            for value, label in [("7 DAYS", "per season"), ("1 SEC", "world tick"), ("10", "commanders per season"), ("OPEN API", "any language")]:
+            for value, label in [("7 DAYS", "per season"), ("1 SEC", "world tick"), ("JOIN ANYTIME", "no player limit"), ("OPEN API", "any language")]:
                 with ui.card().classes("jwars-card col p-5"):
                     ui.label(value).classes("text-2xl jwars-green jwars-mono")
                     ui.label(label).classes("text-xs text-grey-5")
@@ -110,27 +137,12 @@ async def home() -> None:
         with ui.column().classes("w-full gap-4 pt-6"):
             ui.label("FIELD REPORT / CURRENT SEASON").classes("jwars-kicker")
             ui.html('<div id="standings"></div>')
-            with ui.card().classes("jwars-card w-full p-6"):
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label("The hill decides the season").classes("text-xl font-semibold")
-                    status = season.get("status", "offline")
-                    ui.label(status.upper()).classes("jwars-kicker jwars-green")
-                if board and board.get("standings"):
-                    with ui.column().classes("w-full gap-0 pt-3"):
-                        for rank, standing in enumerate(board["standings"], 1):
-                            with ui.row().classes("w-full items-center justify-between border-b border-[#2a342c] py-3"):
-                                ui.label(f"{rank:02d}  {player_name(standing)}").classes("text-sm")
-                                ui.label(f"{standing.get('score', 0)} PTS").classes("jwars-green jwars-mono text-sm")
-                elif board:
-                    ui.label("No commanders on the board yet. Be first when enrollment opens.").classes("text-sm text-grey-5 py-8")
-                else:
-                    ui.label("Standings are temporarily unavailable.").classes("text-sm text-grey-5 py-8")
-                if season:
-                    ui.label(f"Season ends {date_label(season.get('ends_at'))} · {len(board.get('standings', []))} commanders").classes("jwars-kicker pt-3")
+            await live_scoreboard()
+            ui.timer(5.0, live_scoreboard.refresh)
 
         with ui.row().classes("w-full gap-8 pt-10"):
             for number, title, description in [
-                ("01", "Join a season", "Create your account at any time, then enroll during the season window."),
+                ("01", "Join a season", "Create your account and join the current season at any time."),
                 ("02", "Command your army", "Use the HTTP API with a token from your account dashboard."),
                 ("03", "Control the hill", "Hold the center to earn points. The season's top score wins."),
             ]:
@@ -323,7 +335,7 @@ async def season_panel(token: str, account: dict[str, Any]) -> None:
                     show_error(error)
             ui.button("Join this season", on_click=join).classes("jwars-button mt-3")
         else:
-            ui.label("You can join during the next enrollment window.").classes("text-xs text-grey-5 pt-2")
+            ui.label("The season is changing. Refresh to join the next season.").classes("text-xs text-grey-5 pt-2")
 
 
 async def token_panel(token: str) -> None:
@@ -481,7 +493,7 @@ POST /v1/seasons/current/join"""),
   -d '{"id":"order-001","type":"move","unit_ids":["UNIT_ID"],"target":{"x":8,"y":5}}'"""),
             ("LIVE EVENTS", "The event endpoint uses server-sent events. Reconnect with the last sequence number; if it has expired, the server sends a fresh snapshot.", """curl -N -H 'Authorization: Bearer YOUR_API_TOKEN' \\
   'http://localhost:8080/v1/events?after=0'"""),
-            ("SEASONS", "Seasons start Monday at 18:00 UTC. Enrollment lasts 24 hours or closes at the player cap. Returning players keep their player ID and API tokens, but must join during each enrollment window.", "See gameloop.md and README.md in the repository for season timing and game mechanics."),
+            ("SEASONS", "Seasons start Monday at 18:00 UTC. Players can join at any time without a player cap. Returning players keep their player ID and API tokens, but must join each new season.", "See gameloop.md and README.md in the repository for season timing and game mechanics."),
         ]
         for heading, description, sample in doc_sections:
             with ui.card().classes("jwars-card w-full p-6"):

@@ -4,7 +4,7 @@ A persistent, server-authoritative RTS where players build bases and command uni
 
 ## Run locally
 
-Requires Go 1.25 or newer, Docker Compose, `curl`, and `jq` for the helper scripts. The server creates a development player and token, persists the world in PostgreSQL, and advances it once per second during an active season. A new database waits for the next Monday 18:00 UTC start if the current season's enrollment window has already closed.
+Requires Go 1.25 or newer, Docker Compose, `curl`, and `jq` for the helper scripts. The server creates a development player and token, persists the world in PostgreSQL, and advances it once per second during an active season. A new database starts in the current weekly season immediately.
 
 ```sh
 ./tools/run_jwars.sh
@@ -36,6 +36,15 @@ That removes all local player and world data in the Compose database volume and 
 | `JWARS_UI_PORT` | `8081` | NiceGUI listen port |
 | `JWARS_UI_HTTPS_ONLY` | `false` | Set to `true` when the portal is served over HTTPS |
 
+## Backend container
+
+```sh
+docker build -t jwars-backend .
+docker run --rm -p 8080:8080 --env DATABASE_URL jwars-backend
+```
+
+Set `DATABASE_URL` in your environment to your PostgreSQL connection string (including the required TLS settings). The image listens on `0.0.0.0:8080`, includes the game settings, and disables the development player by default. For Azure Container Apps, set the ingress target port to **8080**, supply `DATABASE_URL` as a secret, and keep exactly one backend replica running (minimum and maximum replicas both **1**). A single process owns the game loop. The frontend is deployed separately and uses `JWARS_API_ORIGIN` to reach this server. Its public scoreboard refreshes every five seconds.
+
 ## API
 
 The player portal uses NiceGUI (Python) and runs separately from the Go API. Player accounts use usernames and passwords, with no email or self-service recovery. On first startup with an empty account table, the Go server creates an `admin` account and prints a generated temporary password to its log. Save that password, sign in to the portal, and change it immediately; the account requires a password change before other actions are available.
@@ -52,7 +61,7 @@ web/.venv/bin/pip install -r web/requirements.txt
 
 Run these commands from the repository root. In production set `JWARS_SEED_DEV_PLAYER=false`, `JWARS_ENV=production`, a stable `JWARS_UI_SESSION_SECRET`, `JWARS_UI_HTTPS_ONLY=true`, and `JWARS_API_ORIGIN` to the private Go API address. Keep the NiceGUI service behind HTTPS and a reverse proxy.
 
-Accounts can be created at any time; joining a season remains limited to its enrollment window. From the account dashboard, players can change their public display name and password, join an open season, and create, name, or revoke API tokens. A new token is shown only once. Players use it with `Authorization: Bearer <token>` for game endpoints.
+Accounts can be created and players can join the current season at any time. From the account dashboard, players can change their public display name and password, join an open season, and create, name, or revoke API tokens. A new token is shown only once. Players use it with `Authorization: Bearer <token>` for game endpoints.
 
 The admin dashboard can issue a temporary password that must be changed on next sign-in, or suspend/unsuspend an account. No email is collected, so admins must share temporary passwords directly. Suspended accounts cannot sign in or use game API tokens. Admins cannot view token secrets.
 
@@ -60,13 +69,13 @@ Player registration, current-season status, and the scoreboard are public. Playe
 
 The original direct API registration endpoint (`POST /v1/players`) remains available for command-line clients. It creates a player and joins the current season immediately; portal accounts use `POST /v1/accounts` and join separately.
 
-Players keep their player ID and API tokens between seasons, but must explicitly join each season during its enrollment window:
+Players keep their player ID and API tokens between seasons, but must explicitly join each season at any time while it is active:
 
 ```sh
 JWARS_API_TOKEN='<saved-token>' ./tools/join_season.sh
 ```
 
-Seasons begin Mondays at 18:00 UTC. Enrollment closes 24 hours later or when the 10-player cap is reached. A season still begins on schedule with fewer than five players. `variables/world.json` configures the schedule, enrollment window, player cap, balanced spawn locations, and relative starting-unit offsets. Returning players are assigned a different site where possible; assignments are randomized among available sites.
+Seasons begin Mondays at 18:00 UTC. Players can join throughout the season, with no player cap. `variables/world.json` configures the schedule, balanced spawn locations, and relative starting-unit offsets. Returning players are assigned a different site where possible; assignments are randomized among the least occupied sites; sites are shared once all are occupied.
 
 Get the current player-visible snapshot and available unit/building definitions:
 
@@ -77,7 +86,7 @@ curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/b
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/v1/definitions/units
 ```
 
-Gameplay settings load once at startup from `variables/`: `buildings.json`, `units.json`, `economy.json`, and `world.json`. They include entity stats and costs, starting units/resources, deposit locations and rates, map size, tick interval, hill scoring, season schedule, player cap, and spawn locations. Starting-unit coordinates are offsets from the assigned spawn location; starting-building coordinates are offsets in `buildings.json`. Invalid or missing settings stop startup. Set `JWARS_VARIABLES_DIR` to select another directory; restart the server to apply edits. The building definitions remain available at `/v1/definitions/buildings`; unit stats and training costs are at `/v1/definitions/units`.
+Gameplay settings load once at startup from `variables/`: `buildings.json`, `units.json`, `economy.json`, and `world.json`. They include entity stats and costs, starting units/resources, deposit locations and rates, map size, tick interval, hill scoring, season schedule and spawn locations. Starting-unit coordinates are offsets from the assigned spawn location; starting-building coordinates are offsets in `buildings.json`. Invalid or missing settings stop startup. Set `JWARS_VARIABLES_DIR` to select another directory; restart the server to apply edits. The building definitions remain available at `/v1/definitions/buildings`; unit stats and training costs are at `/v1/definitions/units`.
 
 The current world and resource deposits are persisted in PostgreSQL. Run `./tools/clean_db.sh` once before using this configuration update because the schema changed and migrations are not implemented. Also reset the database after changing map size, starting placements, or deposit locations so persisted state matches those settings.
 
@@ -126,7 +135,7 @@ Workers cannot attack. Melee soldiers have 100 health and deal 20 damage per tic
 
 Workers gather one material every five ticks from visible deposits. Deposits contain 500 materials and regenerate one material per minute up to capacity. Issue a `gather` command with a visible `deposit_id`; workers walk within one tile and continue until given another order. A completed base trains workers (20 materials, 60 ticks); a completed barracks trains one soldier (25 materials, 15 ticks) or archer (40 materials, 25 ticks) at a time. If a player has no workers and cannot afford one, the base automatically starts a free emergency worker order that completes after 300 ticks. Issue a `train` command with the `building_id` and `unit_kind`. `training.started`, `training.completed`, and `training.cancelled` events report training, and snapshots include queue progress. Economy values and unit costs/timing are configured in `variables/economy.json` and `variables/units.json`.
 
-The current loop runs seven-day seasons around a hill at (500, 500). Melee soldiers within its five-tile square control area score one point per minute when no rival melee soldiers are present; workers and archers do not count and contested control awards no points. `/v1/scoreboard` reports the season, hill, standings, and previous result. Snapshots include the season, hill state, and the authenticated player's score and whether they joined the season. `hill.changed` and point-milestone `score.changed` events are ordered with the player's other events. When a season expires, the server records the result and resets the world tick, units, buildings, resources, deposits, and score. Players explicitly rejoin during the next enrollment window, where the server seeds their new base and force. Hill, schedule, spawn, season, map, and tick settings are in `variables/world.json`. See [`gameloop.md`](gameloop.md) for the current loop definition.
+The current loop runs seven-day seasons around a hill at (500, 500). Melee soldiers within its five-tile square control area score one point per minute when no rival melee soldiers are present; workers and archers do not count and contested control awards no points. `/v1/scoreboard` reports the season, hill, standings, and previous result. Snapshots include the season, hill state, and the authenticated player's score and whether they joined the season. `hill.changed` and point-milestone `score.changed` events are ordered with the player's other events. When a season expires, the server records the result and resets the world tick, units, buildings, resources, deposits, and score. Players explicitly rejoin in the next season, where the server seeds their new base and force. Hill, schedule, spawn, season, map, and tick settings are in `variables/world.json`. See [`gameloop.md`](gameloop.md) for the current loop definition.
 
 Convenience Bash scripts for snapshots, scores and standings, listening, move and attack orders, gathering, training, and builds are in [`tools/`](tools/README.md).
 

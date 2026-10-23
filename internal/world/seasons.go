@@ -70,12 +70,7 @@ func seasonStartAtOrBefore(now time.Time, weekdayName, timeOfDay string) time.Ti
 }
 
 func seasonStartForNewWorld(now time.Time, world WorldSettings) time.Time {
-	start := seasonStartAtOrBefore(now, world.SeasonStartWeekday, world.SeasonStartTimeUTC)
-	enrollmentEndsAt := start.Add(time.Duration(world.EnrollmentHours) * time.Hour)
-	if !now.Before(enrollmentEndsAt) {
-		start = start.AddDate(0, 0, 7)
-	}
-	return start
+	return seasonStartAtOrBefore(now, world.SeasonStartWeekday, world.SeasonStartTimeUTC)
 }
 
 func (w *World) seasonHasStarted(ctx context.Context, tx pgx.Tx, now time.Time) (bool, error) {
@@ -95,11 +90,11 @@ func (w *World) CurrentSeason(ctx context.Context) (SeasonStatus, error) {
 		Scan(&status.Number, &status.StartsAt, &status.EndsAt, &status.Status, &status.Players); err != nil {
 		return status, err
 	}
-	status.EnrollmentEndsAt = status.StartsAt.Add(time.Duration(w.config.World.EnrollmentHours) * time.Hour)
-	status.MaxPlayers = w.config.World.MaxPlayers
+	status.EnrollmentEndsAt = status.EndsAt
+	status.MaxPlayers = 0 // Zero means unlimited.
 	now := w.now()
 	status.Status = seasonPhase(status.SeasonInfo, now)
-	status.EnrollmentOpen = !now.Before(status.StartsAt) && now.Before(status.EnrollmentEndsAt) && status.Players < status.MaxPlayers
+	status.EnrollmentOpen = !now.Before(status.StartsAt) && now.Before(status.EndsAt)
 	return status, nil
 }
 
@@ -196,19 +191,10 @@ func lockCurrentSeason(ctx context.Context, tx pgx.Tx) (SeasonInfo, error) {
 }
 
 func (w *World) joinPlayerTx(ctx context.Context, tx pgx.Tx, playerID string, season SeasonInfo, enforceEnrollment bool) (SeasonJoin, error) {
-	status := SeasonStatus{SeasonInfo: season}
-	status.EnrollmentEndsAt = season.StartsAt.Add(time.Duration(w.config.World.EnrollmentHours) * time.Hour)
-	var count int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM season_players WHERE season_number=$1`, season.Number).Scan(&count); err != nil {
-		return SeasonJoin{}, err
-	}
 	if enforceEnrollment {
 		now := w.now()
-		if now.Before(season.StartsAt) || !now.Before(status.EnrollmentEndsAt) {
+		if now.Before(season.StartsAt) || !now.Before(season.EndsAt) {
 			return SeasonJoin{}, ErrEnrollmentClosed
-		}
-		if count >= w.config.World.MaxPlayers {
-			return SeasonJoin{}, ErrSeasonFull
 		}
 	}
 	spawnIndex, err := w.nextSpawnIndex(ctx, tx, season.Number, playerID)

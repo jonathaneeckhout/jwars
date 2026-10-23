@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Jwars is a week-long, free-for-all RTS competition for 5–10 players. Players write and improve autonomous clients, then compete to control a shared objective. The appeal is both strategic and technical: each client must make good decisions from partial information, coordinate units, and adapt to rival clients over a persistent match.
+Jwars is a week-long, free-for-all RTS competition with no player cap. Players write and improve autonomous clients, then compete to control a shared objective. The appeal is both strategic and technical: each client must make good decisions from partial information, coordinate units, and adapt to rival clients over a persistent match.
 
 ## Season format
 
@@ -12,9 +12,9 @@ Jwars is a week-long, free-for-all RTS competition for 5–10 players. Players w
 - At the next season, the map and score reset for a new competition.
 - The MVP is free-for-all. Other players are the only opponents; there are no neutral threats or scheduled PvE events.
 
-Seasons start every Monday at 18:00 UTC and last seven real-time days. The schedule is configurable in `variables/world.json`. New players can register and join during the first 24 hours; returning players keep their player ID and API token and explicitly rejoin each season. Late joiners start immediately and use the same scoring rules as everyone else. The server accepts up to 10 players and starts on schedule even if fewer than five have joined.
+Seasons start every Monday at 18:00 UTC and last seven real-time days. The schedule is configurable in `variables/world.json`. New players can register and join at any time; returning players keep their player ID and API token and explicitly rejoin each season. Late joiners start immediately and use the same scoring rules as everyone else. The server has no player limit.
 
-Every player starts with a base, one worker, one melee soldier, and 100 materials. The server randomly assigns balanced spawn locations, each equally distant from the hill and with a nearby material deposit. Returning players avoid their previous spawn when another site is available. Workers can be trained at the base. If a player has no workers and lacks the materials to train one, the base slowly produces a free emergency worker so the player cannot be permanently locked out of the economy. At season end, the server records the final standings and winners, resets the world and score, and opens a fresh enrollment window at the next scheduled start.
+Every player starts with a base, one worker, one melee soldier, and 100 materials. The server randomly assigns balanced spawn locations, each equally distant from the hill and with a nearby material deposit. Returning players avoid their previous spawn when another equally occupied site is available. Players are assigned among the least occupied sites, sharing sites once all are occupied. Workers can be trained at the base. If a player has no workers and lacks the materials to train one, the base slowly produces a free emergency worker so the player cannot be permanently locked out of the economy. At season end, the server records the final standings and winners, resets the world and score, and allows players to join the next season.
 
 ## Core loop
 
@@ -65,6 +65,6 @@ These are intentionally left for a later pass and must not be silently assumed w
 - The scoreboard identifies the highest score and supports shared wins on a tie.
 - The world can continue the loop while a player's autonomous client operates without manual per-order input.
 - `GET /v1/scoreboard` and the authenticated world snapshot expose the active season, hill state, and standings/own score.
-- Public player registration returns a one-time API token; returning players explicitly join each season through the API during the enrollment window.
-- Seasons start Monday at 18:00 UTC, admit up to 10 players for 24 hours, and assign balanced spawn locations with the same starting loadout.
+- Public player registration returns a one-time API token; returning players explicitly join each season through the API at any time.
+- Seasons start Monday at 18:00 UTC, allow joining at any time without a player cap, and assign balanced spawn locations with the same starting loadout.
 - Hill ownership changes and each newly earned point are delivered as ordered events; no per-tick score event is emitted.

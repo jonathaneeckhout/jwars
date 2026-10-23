@@ -11,15 +11,15 @@ import (
 
 type testScoreboard struct {
 	Season struct {
-		Number int64 `json:"number"`
+		Number int64     `json:"number"`
 		EndsAt time.Time `json:"ends_at"`
 	} `json:"season"`
 	Hill struct {
-		X           int     `json:"x"`
-		Y           int     `json:"y"`
-		Radius      int     `json:"control_radius"`
-		OwnerID     *string `json:"owner_player_id"`
-		Contested   bool    `json:"contested"`
+		X         int     `json:"x"`
+		Y         int     `json:"y"`
+		Radius    int     `json:"control_radius"`
+		OwnerID   *string `json:"owner_player_id"`
+		Contested bool    `json:"contested"`
 	} `json:"hill"`
 	Standings []struct {
 		PlayerID       string `json:"player_id"`
@@ -27,7 +27,9 @@ type testScoreboard struct {
 		ControlSeconds int64  `json:"control_seconds"`
 	} `json:"standings"`
 	LastCompleted *struct {
-		Season struct { Number int64 `json:"number"` } `json:"season"`
+		Season struct {
+			Number int64 `json:"number"`
+		} `json:"season"`
 		Winners []string `json:"winners"`
 	} `json:"last_completed,omitempty"`
 }
@@ -125,4 +127,33 @@ func standingFor(t *testing.T, scoreboard testScoreboard, playerID string) struc
 		Score          int64  `json:"score"`
 		ControlSeconds int64  `json:"control_seconds"`
 	}{}
+}
+
+func TestSeason_JoiningAfterFirstDayAndBeyondSpawnCount(t *testing.T) {
+	originalTime := testNow
+	defer func() { testNow = originalTime }()
+	ctx := context.Background()
+	var startsAt time.Time
+	if err := testPool.QueryRow(ctx, `SELECT starts_at FROM world_season WHERE singleton=TRUE`).Scan(&startsAt); err != nil {
+		t.Fatal(err)
+	}
+	testNow = startsAt.Add(48 * time.Hour)
+	var status world.SeasonStatus
+	apiDo(t, http.MethodGet, "/v1/seasons/current", "", nil, &status, http.StatusOK)
+	if !status.EnrollmentOpen || status.MaxPlayers != 0 || !status.EnrollmentEndsAt.Equal(status.EndsAt) {
+		t.Fatalf("expected unlimited enrollment through season end: %+v", status)
+	}
+	config, err := world.LoadConfig(testVariablesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= len(config.World.SpawnLocations); i++ {
+		var registration world.PlayerRegistration
+		apiDo(t, http.MethodPost, "/v1/players", "", map[string]any{}, &registration, http.StatusCreated)
+		var joined world.SeasonJoin
+		apiDo(t, http.MethodPost, "/v1/seasons/current/join", registration.Token, map[string]any{}, &joined, http.StatusOK)
+		if !joined.AlreadyJoined {
+			t.Fatal("joining twice must not create another participant")
+		}
+	}
 }

@@ -287,22 +287,26 @@ func (w *World) nextSpawnIndex(ctx context.Context, tx pgx.Tx, seasonNumber int6
 	if err != nil {
 		return 0, err
 	}
-	used := make(map[int]bool)
+	used := make(map[int]int)
 	for rows.Next() {
 		var index int
 		if err := rows.Scan(&index); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		used[index] = true
+		used[index]++
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	leastUsed := int(^uint(0) >> 1)
+	for index := range w.config.World.SpawnLocations {
+		leastUsed = min(leastUsed, used[index])
+	}
 	available := make([]int, 0, len(w.config.World.SpawnLocations))
 	for index := range w.config.World.SpawnLocations {
-		if !used[index] {
+		if used[index] == leastUsed {
 			available = append(available, index)
 		}
 	}
@@ -317,10 +321,6 @@ func (w *World) nextSpawnIndex(ctx context.Context, tx pgx.Tx, seasonNumber int6
 		available = rotated
 	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return 0, err
-	}
-	if len(available) == 0 {
-		// Initialize is a local development bootstrap and can coexist with API-created players.
-		return int(seasonNumber % int64(len(w.config.World.SpawnLocations))), nil
 	}
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err != nil {

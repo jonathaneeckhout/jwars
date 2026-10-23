@@ -46,8 +46,6 @@ type WorldSettings struct {
 	SeasonDurationSeconds int64          `json:"season_duration_seconds"`
 	SeasonStartWeekday    string         `json:"season_start_weekday"`
 	SeasonStartTimeUTC    string         `json:"season_start_time_utc"`
-	EnrollmentHours       int            `json:"enrollment_hours"`
-	MaxPlayers            int            `json:"max_players"`
 	SpawnLocations        []Point        `json:"spawn_locations"`
 	StartingUnits         []StartingUnit `json:"starting_units"`
 }
@@ -73,7 +71,7 @@ func LoadConfig(directory string) (GameConfig, error) {
 			Units *[]UnitDefinition `json:"units"`
 		}{Units: &config.Units}},
 		{name: "economy.json", required: []string{"starting_materials", "gather_interval_ticks", "gather_range", "deposit_capacity", "deposit_regeneration_interval_ticks", "deposit_regeneration_amount", "deposit_locations"}, target: &config.Economy},
-		{name: "world.json", required: []string{"map_size", "tick_interval_millis", "hill", "hill_radius", "ticks_per_control_point", "season_duration_seconds", "season_start_weekday", "season_start_time_utc", "enrollment_hours", "max_players", "spawn_locations", "starting_units"}, target: &config.World},
+		{name: "world.json", required: []string{"map_size", "tick_interval_millis", "hill", "hill_radius", "ticks_per_control_point", "season_duration_seconds", "season_start_weekday", "season_start_time_utc", "spawn_locations", "starting_units"}, target: &config.World},
 	} {
 		content, err := os.ReadFile(filepath.Join(directory, file.name))
 		if err != nil {
@@ -113,8 +111,8 @@ func (c GameConfig) Validate() error {
 	if weekday, ok := parseWeekday(c.World.SeasonStartWeekday); !ok || strings.ToLower(weekday.String()) != c.World.SeasonStartWeekday {
 		return fmt.Errorf("season_start_weekday must be a lowercase weekday name")
 	}
-	if c.World.EnrollmentHours < 1 || c.World.EnrollmentHours >= 168 || c.World.MaxPlayers < 1 || c.World.MaxPlayers > len(c.World.SpawnLocations) {
-		return fmt.Errorf("world enrollment hours, max players, and spawn locations are invalid")
+	if len(c.World.SpawnLocations) == 0 {
+		return fmt.Errorf("at least one spawn location is required")
 	}
 	if !c.World.contains(c.World.Hill.X, c.World.Hill.Y) || c.World.HillRadius < 0 {
 		return fmt.Errorf("world hill must be within the map and have a non-negative radius")

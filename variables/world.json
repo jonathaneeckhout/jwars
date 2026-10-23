@@ -7,8 +7,6 @@
   "season_duration_seconds": 604800,
   "season_start_weekday": "monday",
   "season_start_time_utc": "18:00",
-  "enrollment_hours": 24,
-  "max_players": 10,
   "spawn_locations": [
     { "x": 200, "y": 200 },
     { "x": 500, "y": 200 },
