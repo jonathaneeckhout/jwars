@@ -25,6 +25,8 @@ That removes all local player and world data in the Compose database volume and 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgres://jwars:jwars@127.0.0.1:5432/jwars?sslmode=disable` | PostgreSQL connection string |
+| `DATABASE_AUTH` | `password` | Set to `azure-managed-identity` for Azure PostgreSQL Entra token authentication |
+| `AZURE_CLIENT_ID` | unset | User-assigned managed identity client ID for database auth; unset selects the system-assigned identity |
 | `JWARS_ADDR` | `127.0.0.1:8080` | HTTP listen address |
 | `JWARS_API_TOKEN` | `dev-token` | Development bearer token, stored as a SHA-256 hash |
 | `JWARS_PLAYER_ID` | `player-1` | Player associated with the development token |
@@ -44,6 +46,52 @@ docker run --rm -p 8080:8080 --env DATABASE_URL jwars-backend
 ```
 
 Set `DATABASE_URL` in your environment to your PostgreSQL connection string (including the required TLS settings). The image listens on `0.0.0.0:8080`, includes the game settings, and disables the development player by default. For Azure Container Apps, set the ingress target port to **8080**, supply `DATABASE_URL` as a secret, and keep exactly one backend replica running (minimum and maximum replicas both **1**). A single process owns the game loop. The frontend is deployed separately and uses `JWARS_API_ORIGIN` to reach this server. Its public scoreboard refreshes every five seconds.
+
+### Azure PostgreSQL with Entra managed identity
+
+Set `DATABASE_AUTH=azure-managed-identity` and use a passwordless `DATABASE_URL` with `sslmode=verify-full`. Set `AZURE_CLIENT_ID` to the runtime Purpose identity client ID (`ADW_AZURE_PURPOSE_CLIENT_ID`), rather than the CI/CD or frontend app-registration client ID. The identity must already be attached to the Container App and mapped to an authorized PostgreSQL role matching `ADW_DB_USER`. Database network access must also be configured. The backend and admin CLI both support this authentication mode.
+
+The following Bash example assumes the company variables are exported into the shell. Replace `MYDB` with the database asset's actual variable prefix and `APIAPI` with the application asset's prefix. For single compute, use `ADW_APIAPI_CONTAINER_APP` instead of `ADW_APIAPI_CONTAINER_APP_BE`.
+
+```bash
+export PGHOST="$ADW_MYDB_SERVER_FQDN"
+export PGDATABASE="$ADW_MYDB_DATABASE_NAME"
+export PGPORT="$ADW_DB_PORT"
+export PGUSER="$ADW_DB_USER"
+
+# Encode usernames/database names so spaces and URI punctuation remain valid.
+DATABASE_URL="$(python3 - <<'PY'
+import os
+from urllib.parse import quote, urlencode
+print('postgresql://{}:{}/{}?{}'.format(
+    os.environ['PGHOST'], os.environ['PGPORT'],
+    quote(os.environ['PGDATABASE'], safe=''),
+    urlencode({'user': os.environ['PGUSER'], 'sslmode': 'verify-full'}),
+))
+PY
+)"
+
+# IMAGE must be the image tag pushed to ACR. Run this only after stopping
+# all existing backend revisions and confirming their replicas have exited.
+az containerapp update \
+  --name "$ADW_APIAPI_CONTAINER_APP_BE" \
+  --resource-group "$ADW_RES_GROUP" \
+  --subscription "$ADW_AZURE_SUBSCRIPTION_ID" \
+  --image "$IMAGE" \
+  --min-replicas 1 --max-replicas 1 \
+  --set-env-vars \
+    "DATABASE_URL=$DATABASE_URL" \
+    DATABASE_AUTH=azure-managed-identity \
+    "AZURE_CLIENT_ID=$ADW_AZURE_PURPOSE_CLIENT_ID"
+```
+
+No database password or access token needs to be deployed as a secret in this mode. The Azure Identity SDK obtains and caches tokens, refreshing them as necessary when the pool creates new physical PostgreSQL connections. Do not store a one-time Entra token in `DATABASE_URL`: it will expire. Leave `DATABASE_AUTH` unset for local password authentication. To test managed identity locally, run the container in an Azure environment with the identity available; this mode does not use a developer's `az login` session.
+
+The application currently executes schema DDL at startup, including `ALTER TABLE`, so the runtime role still needs the corresponding ownership/DDL privileges. A separate CI/CD migration step using `ADW_DB_USER_CICD` is not implemented. Do not reset a deployed database with the local cleanup scripts.
+
+Keep one backend replica running to advance the world without HTTP traffic. Replica limits apply per revision: even single revision mode can briefly run old and new processes together during an update. Until database-backed game-loop ownership is implemented, stop all old backend revisions and verify their replicas have terminated before deploying a new revision; expect a maintenance window.
+
+Azure references: [managed identity in Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity), [PostgreSQL managed identity authentication](https://learn.microsoft.com/en-us/azure/postgresql/security/security-connect-with-managed-identity), and [revision lifecycle](https://learn.microsoft.com/en-us/azure/container-apps/revisions).
 
 ## API
 

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jojo/jwars/internal/accounts"
+	"github.com/jojo/jwars/internal/database"
 	"golang.org/x/term"
 )
 
@@ -58,7 +58,7 @@ func createAdmin() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := database.NewPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
@@ -82,7 +82,7 @@ func resetAdminPassword(username string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := database.NewPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}

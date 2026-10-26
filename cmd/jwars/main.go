@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jojo/jwars/internal/api"
+	"github.com/jojo/jwars/internal/database"
 	"github.com/jojo/jwars/internal/world"
 )
 
@@ -35,7 +36,7 @@ func run() error {
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelConnect()
-	pool, err := pgxpool.New(connectCtx, databaseURL)
+	pool, err := database.NewPool(connectCtx, databaseURL)
 	if err != nil {
 		return err
 	}

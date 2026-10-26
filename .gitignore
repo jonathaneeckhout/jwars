@@ -30,6 +30,13 @@ go.work.sum
 # Local world save
 /data/
 
+# Python UI environment and NiceGUI session storage
+web/.venv/
+/.venv/
+web/**/__pycache__/
+web/**/*.pyc
+.nicegui/
+
 # Editor/IDE
 # .idea/
 # .vscode/
